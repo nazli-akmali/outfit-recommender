@@ -1,0 +1,20 @@
+{
+  "title": "Wardrobe Assistant",
+  "author": "Nazli Akmali",
+  "repo": "https://github.com/nazli-akmali/outfit-recommender",
+  "portfolio": "https://nazli-akmali.github.io/",
+  "output": "_site",
+  "static": "site/static",
+  "demo": {
+    "dest": "app",
+    "files": ["index.html", "styles.css", "js", "assets"]
+  },
+  "pages": [
+    {
+      "source": "docs/PRODUCT_CASE_STUDY.md",
+      "dest": "case-study",
+      "template": "site/page.html",
+      "eyebrow": "Product case study"
+    }
+  ]
+}

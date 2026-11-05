@@ -8,6 +8,15 @@ A browser-based MVP that combines your wardrobe, plans, and weather during the h
 **Built with:** Vanilla JavaScript, Open-Meteo, localStorage, and IndexedDB.  
 **Project focus:** Product discovery, UX iteration, and AI-assisted implementation.
 
+**[Project page](https://nazli-akmali.github.io/outfit-recommender/)** · **[Live demo](https://nazli-akmali.github.io/outfit-recommender/app/)** · **[Case study](https://nazli-akmali.github.io/outfit-recommender/case-study/)**
+
+<p>
+  <img src="site/static/images/wardrobe.png" width="200" alt="Wardrobe with a readiness indicator">
+  <img src="site/static/images/day-and-weather.png" width="200" alt="Day plan with the hourly forecast for the hours out">
+  <img src="site/static/images/explained-outfit.png" width="200" alt="An explained outfit suggestion">
+  <img src="site/static/images/swap-item.png" width="200" alt="Swapping an item for an alternative you own">
+</p>
+
 ## The problem
 
 Choosing an outfit takes more than finding clothes that look good together. It also means accounting for a cold morning, a warm indoor space, a walking commute, and a different occasion later in the day.
@@ -49,6 +58,14 @@ python3 -m http.server 5173 --bind 127.0.0.1
 Open [http://localhost:5173](http://localhost:5173). It works best at phone width. Serve the files over HTTP rather than opening the HTML file directly so JavaScript modules load correctly.
 
 Forecast retrieval and optional online image search require an internet connection. The curated catalog is bundled locally.
+
+### Showcase site
+
+The [project page](https://nazli-akmali.github.io/outfit-recommender/) is built by `site/build.py` from `site/showcase.json`. It combines the landing page in `site/static/`, the app copied into `/app/`, and the product case study rendered from Markdown into `/case-study/`. The `.github/workflows/pages.yml` workflow publishes it to GitHub Pages on every push to `main`. To preview it locally:
+
+```bash
+pip install markdown==3.7 && python3 site/build.py && python3 -m http.server 5174 --directory _site
+```
 
 ## How it works
 

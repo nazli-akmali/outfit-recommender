@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Wardrobe Assistant — Seyedeh Nazli Akmali</title>
+  <meta name="description" content="A day-first wardrobe MVP that suggests explained outfits from the clothes you own, using the weather for the hours you are out. Product case study and live demo.">
+  <meta name="theme-color" content="#F5F2EC" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#1A1A1C" media="(prefers-color-scheme: dark)">
+  <meta property="og:title" content="Wardrobe Assistant">
+  <meta property="og:description" content="Choose an outfit for your day, using the clothes you already own. Product case study and live demo.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://nazli-akmali.github.io/outfit-recommender/">
+  <meta property="og:image" content="https://nazli-akmali.github.io/outfit-recommender/images/explained-outfit.png">
+  <link rel="stylesheet" href="site.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%233F6B5A'/%3E%3Cpath d='M12.5 9.5a3.5 3.5 0 0 1 7 0c0 1.6-1.3 2.4-2.4 3-.6.3-1.1.8-1.1 1.4v.6M16 14.5l9 7.2c.7.6.3 1.8-.7 1.8H7.7c-1 0-1.4-1.2-.7-1.8z' fill='none' stroke='white' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+</head>
+<body>
+  <header class="topbar">
+    <div class="wrap">
+      <a class="brand" href="https://nazli-akmali.github.io/">Nazli Akmali <span>/ Wardrobe Assistant</span></a>
+      <nav class="topnav" aria-label="Project">
+        <a href="app/">Demo</a>
+        <a href="case-study/">Case study</a>
+        <a class="hide-sm" href="https://github.com/nazli-akmali/outfit-recommender">Code</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div class="wrap">
+        <div>
+          <p class="eyebrow">Product case study · Functional MVP</p>
+          <h1>Wardrobe Assistant</h1>
+          <p class="lead">Choose an outfit for your day, using the clothes you already own.</p>
+          <p class="muted">A browser-based MVP that combines your wardrobe, your plans and the weather during the hours you are out to suggest up to three explained outfits.</p>
+          <div class="btns">
+            <a class="btn primary" href="app/">Try the live demo
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a>
+            <a class="btn" href="case-study/">Read the case study</a>
+          </div>
+        </div>
+        <div class="hero-phones" aria-hidden="true">
+          <div class="phone back"><img src="images/day-and-weather.png" alt="" width="390" height="844"></div>
+          <div class="phone front"><img src="images/explained-outfit.png" alt="" width="390" height="844"></div>
+        </div>
+      </div>
+    </section>
+
+    <div class="facts">
+      <div class="wrap">
+        <dl>
+          <div><dt>My role</dt><dd>Product discovery, requirements, prioritisation, iteration</dd></div>
+          <div><dt>Approach</dt><dd>AI-assisted design and implementation</dd></div>
+          <div><dt>Stage</dt><dd>Functional MVP; user validation pending</dd></div>
+          <div><dt>Built with</dt><dd>Vanilla JavaScript, Open-Meteo, browser storage</dd></div>
+        </dl>
+      </div>
+    </div>
+
+    <section class="block" id="problem">
+      <div class="wrap">
+        <div class="intro">
+          <p class="eyebrow">The problem</p>
+          <h2>A good-looking outfit isn't enough. It has to work for the whole day.</h2>
+          <p>Getting dressed means accounting for a cold morning walk, hours in a warm lecture hall and a café later, often in clothes that are in the laundry. Competitor testing showed that weather-aware suggestions already exist, so I reframed the opportunity around how quickly someone reaches an outfit they would actually wear.</p>
+          <blockquote class="hypothesis">
+            Can a day-first flow and a faster starter wardrobe help users reach their first useful outfit with less effort?
+            <footer>The hypothesis this MVP makes testable. It isn't proven yet.</footer>
+          </blockquote>
+        </div>
+      </div>
+    </section>
+
+    <section class="block" id="how-it-works">
+      <div class="wrap">
+        <div class="intro">
+          <p class="eyebrow">How it works</p>
+          <h2>From “here is my day” to a few outfits you could realistically wear</h2>
+        </div>
+        <ol class="steps">
+          <li class="step">
+            <div class="step-text">
+              <h3>Start small with a usable wardrobe</h3>
+              <p>Pick everyday basics from 83 curated garment examples, search the larger catalog or upload a photo. A readiness indicator shows which categories are still missing.</p>
+              <ul>
+                <li>No need to add everything up front</li>
+                <li>Warmth and waterproofing start as labelled typical values, never guessed from an image</li>
+              </ul>
+            </div>
+            <div class="phone"><img src="images/wardrobe.png" alt="Wardrobe screen showing illustrated garments grouped by category, with a 'Ready for 5 of 5' indicator" width="390" height="844" loading="lazy"></div>
+          </li>
+          <li class="step">
+            <div class="step-text">
+              <h3>Describe the day, and check the weather for those hours</h3>
+              <p>Choose a preset like <em>University, then a café</em> or describe your plans in your own words. The app reads the forecast only for the hours you're out: coldest and warmest feels-like temperature, rain and wind.</p>
+              <ul>
+                <li>Editable times, travel and formality</li>
+                <li>Manual weather entry if the forecast is unavailable</li>
+              </ul>
+            </div>
+            <div class="phone"><img src="images/day-and-weather.png" alt="Day plan for 09:00 to 18:00 with an hourly forecast from 5 to 10 degrees" width="390" height="844" loading="lazy"></div>
+          </li>
+          <li class="step">
+            <div class="step-text">
+              <h3>Compare up to three explained options</h3>
+              <p>Suggestions are labelled <em>More relaxed</em>, <em>In between</em> and <em>More polished</em>. Each one explains itself, for example which layer keeps you warm at the coldest hour and what to take off indoors.</p>
+              <ul>
+                <li>Only clothes you own and that are available</li>
+                <li>If something important is missing, the app explains the gap instead of forcing an outfit</li>
+              </ul>
+            </div>
+            <div class="phone"><img src="images/explained-outfit.png" alt="An outfit of coat, sweater, shirt, wide-leg jeans and sneakers with reasons such as 'Warm enough for 1° feels-like'" width="390" height="844" loading="lazy"></div>
+          </li>
+          <li class="step">
+            <div class="step-text">
+              <h3>Adjust, then teach it</h3>
+              <p>Swap any item for an alternative you own, or lock it and rebuild the other outfits around it. After wearing an outfit, feedback such as “too cold” or “too casual” adjusts local, rule-based preferences.</p>
+              <ul>
+                <li>Every alternative shows why it fits, or why it doesn't</li>
+                <li>Transparent rules, not a black-box model</li>
+              </ul>
+            </div>
+            <div class="phone"><img src="images/swap-item.png" alt="Swap sheet listing alternative bottoms with reasons, and an option to lock the current choice" width="390" height="844" loading="lazy"></div>
+          </li>
+        </ol>
+      </div>
+    </section>
+
+    <section class="block" id="iteration">
+      <div class="wrap">
+        <div class="intro">
+          <p class="eyebrow">The biggest iteration</p>
+          <h2>A large image source isn't the same as a useful wardrobe catalog</h2>
+          <p>The first version relied on live Wikimedia image search. Many results showed people, street scenes or poorly framed garments, so quick setup lost its value. Fixing wardrobe setup became the main design problem.</p>
+        </div>
+        <div class="decision">
+          <div class="phone"><img src="images/catalog-search.png" alt="Catalog search where 'light blue wide-leg jeans' has been turned into removable Bottoms, Jeans, Wide-leg and Light blue filters" width="390" height="844" loading="lazy"></div>
+          <div class="changes">
+            <div class="change">
+              <div class="from">Live image search as the main source</div>
+              <div class="to">83 curated garment examples, with filtered online results as a secondary source</div>
+              <p class="why">Recognisable, relevant examples matter more than the number of results.</p>
+            </div>
+            <div class="change">
+              <div class="from">A six-step setup wizard</div>
+              <div class="to">One browsable basics screen with a sticky readiness indicator</div>
+              <p class="why">People can go straight to the garments they own.</p>
+            </div>
+            <div class="change">
+              <div class="from">General text search</div>
+              <div class="to">Search terms become removable type, cut and colour filters</div>
+              <p class="why">The interpretation is visible and easy to correct.</p>
+            </div>
+            <div class="change">
+              <div class="from">Treating visual similarity broadly</div>
+              <div class="to">Rank garment structure before colour</div>
+              <p class="why">Jeans in the wrong cut are a poor stand-in, even in the right colour.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="block" id="status">
+      <div class="wrap">
+        <div class="intro">
+          <p class="eyebrow">Where it stands</p>
+          <h2>A working MVP is the start of validation, not the end</h2>
+          <p>Implementing the journey makes the hypothesis testable. It doesn't prove it.</p>
+        </div>
+        <div class="status">
+          <div class="card">
+            <h3>Checked so far</h3>
+            <ul>
+              <li>Main journeys tested manually in the browser at phone width</li>
+              <li>Implementation issues found during iteration and fixed</li>
+              <li>Honest fallbacks: missing-clothing guidance, manual weather, labelled stand-in images</li>
+            </ul>
+          </div>
+          <div class="card open">
+            <h3>What I'd validate next</h3>
+            <ul>
+              <li>Time to a balanced starter wardrobe, and where new users get stuck</li>
+              <li>Time to the first outfit someone would actually wear</li>
+              <li>Whether outfits work for the whole day, across several days of wear</li>
+              <li>Whether feedback reduces repeated mismatches</li>
+            </ul>
+          </div>
+        </div>
+        <p class="muted" style="margin-top:24px">Catalog garments are currently labelled illustrations. Licensed garment photography is the main remaining visual gap.</p>
+      </div>
+    </section>
+
+    <div class="wrap">
+      <div class="cta">
+        <div>
+          <h2>Try it yourself</h2>
+          <p>No account needed. Everything you add stays in your own browser. It works best at phone width.</p>
+        </div>
+        <div class="btns">
+          <a class="btn" href="app/">Open the demo</a>
+          <a class="btn ghost" href="case-study/">Read the case study</a>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <footer class="footer">
+    <div class="wrap">
+      <span>Created by <strong>Seyedeh Nazli Akmali</strong> as a personal product management portfolio project, with AI-assisted implementation.</span>
+      <span><a href="https://github.com/nazli-akmali/outfit-recommender">Source on GitHub</a> · <a href="https://nazli-akmali.github.io/">Portfolio</a></span>
+    </div>
+  </footer>
+
+  <script>
+    const bar = document.querySelector('.topbar');
+    const onScroll = () => bar.classList.toggle('scrolled', scrollY > 8);
+    addEventListener('scroll', onScroll, { passive: true }); onScroll();
+  </script>
+</body>
+</html>
