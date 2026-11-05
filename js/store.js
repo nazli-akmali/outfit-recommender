@@ -1,6 +1,6 @@
 // Local-only persistence. Structured data lives in localStorage;
 // photo blobs live in IndexedDB. Nothing is sent to a server.
-import { defaultItemFields, TYPE, colorLabel } from './catalog.js';
+import { defaultItemFields, defaultLength, TYPE, colorLabel } from './catalog.js';
 
 const KEY = 'wardrobe-assistant.v1';
 
@@ -11,8 +11,10 @@ const EMPTY = () => ({
   saved: [],     // saved outfit combinations
   wears: [],     // outfits chosen for a day (+ optional feedback)
   rejections: [], // suggestions rejected with a reason
+  reports: [],    // online archive images reported as irrelevant (hidden on this device)
   prefs: {
     onboarded: false,
+    collection: null,     // 'womenswear' | 'menswear' | 'all' — ordering only; null = not asked
     location: null,
     thermal: 'neutral',   // user's self-description
     learnedThermal: 0,    // learned from feedback, in warmth points (+ = needs warmer)
@@ -33,11 +35,26 @@ function load() {
     if (!s) return EMPTY();
     const data = JSON.parse(s);
     const base = EMPTY();
+    for (const it of data.items || []) migrateItem(it);
     return { ...base, ...data, prefs: { ...base.prefs, ...(data.prefs || {}) } };
   } catch (e) {
     console.warn('Could not read saved data', e);
     return EMPTY();
   }
+}
+
+// Older items: catalogue images were called illustrations, and lengths
+// (mini/midi/maxi, cropped/long) were stored as cuts.
+function migrateItem(it) {
+  if (!it.image || it.image.kind === 'illustration') it.image = { kind: 'catalog' };
+  const t = TYPE[it.type];
+  if (!t) return;
+  if (t.lengths && !it.length) {
+    it.length = t.lengths.includes(it.cut) ? it.cut : defaultLength(t);
+  }
+  if (it.type === 'cardigan' && !t.cuts.includes(it.cut)) it.cut = it.cut === 'chunky' ? 'chunky' : 'fine-knit';
+  if (!t.cuts.includes(it.cut)) it.cut = t.defaultCut || t.cuts[0];
+  if (it.length === undefined) it.length = null;
 }
 
 export function save() {
@@ -54,24 +71,25 @@ export function uid(prefix = 'i') {
   return `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
 }
 
-export function itemName(typeId, colorId, cut) {
+export function itemName(typeId, colorId, cut, length) {
   const t = TYPE[typeId];
-  const showCut = cut && t.cuts.length > 1 && cut !== 'regular' && cut !== t.cuts[0];
-  const colorWord = { denim: 'Mid-wash', lightdenim: 'Light-wash' }[colorId] || colorLabel(colorId);
-  return `${colorWord} ${showCut ? cut + ' ' : ''}${t.label.split(' / ')[0].toLowerCase()}`;
+  const showCut = cut && t.cuts.length > 1 && cut !== 'regular' && cut !== (t.defaultCut || t.cuts[0]);
+  const showLen = length && t.lengths && length !== defaultLength(t) && !['regular', 'full'].includes(length);
+  const colorWord = { denim: 'Mid-wash', lightdenim: 'Light-wash', darkdenim: 'Dark-wash' }[colorId] || colorLabel(colorId);
+  const lenWord = showLen ? `${length === 'knee' ? 'knee-length' : length} ` : '';
+  return `${colorWord} ${lenWord}${showCut ? cut + ' ' : ''}${t.label.split(' / ')[0].toLowerCase()}`;
 }
 
-// image: { kind: 'illustration' } | { kind: 'archive', url, thumb, source, license, author, pageUrl } | { kind: 'photo', photoId }
-export function createItem({ type, color, cut, pattern = 'solid', image = { kind: 'illustration' }, ...rest }) {
-  const base = defaultItemFields(type);
+// image: { kind: 'catalog' } (follows type/cut/colour) | { kind: 'archive', url, thumb, source, license, author, pageUrl } | { kind: 'photo', photoId }
+export function createItem({ type, color, cut, length, pattern = 'solid', image = { kind: 'catalog' }, ...rest }) {
+  const base = defaultItemFields(type, cut, length);
   const item = {
     id: uid('it'),
     ownership: 'owned',
     ...base,
-    cut: cut || base.cut,
     color,
     pattern,
-    name: itemName(type, color, cut || base.cut),
+    name: itemName(type, color, base.cut, base.length),
     image,
     status: 'available', // available | laundry | unavailable
     createdAt: Date.now(),

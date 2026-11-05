@@ -82,14 +82,14 @@ export function scoreItem(item, ctx) {
     if (ctx.hot && item.type === 'boots') score -= 0.8;
   }
   if (item.slot === 'bottom' || item.slot === 'dress') {
-    const legs = t.legs === 1 && item.cut === 'maxi' ? 3 : t.legs === 1 && item.cut === 'midi' ? 2 : t.legs;
+    const legs = t.legs === 1 && item.length === 'maxi' ? 3 : t.legs === 1 && ['midi', 'knee'].includes(item.length) ? 2 : t.legs;
     if (ctx.weather.feelsMin < 10 && legs <= 1) { score -= 1.5; notes.push(`Bare legs at ${r0(ctx.weather.feelsMin)}° — tights would help`); }
     if (ctx.hot && legs >= 3 && ctx.formality <= 3) score -= 0.6;
     if (ctx.hot && legs <= 1) score += 0.4;
-    if (ctx.moves.has('cycle') && ['mini', 'maxi'].includes(item.cut)) { score -= 1.5; notes.push(`A ${item.cut} ${t.label.toLowerCase()} can be tricky on a bike`); }
-    if (ctx.windy && item.cut === 'mini') { score -= 0.5; notes.push(`Windy (${r0(ctx.weather.windMax)} km/h) — a mini may be fiddly`); }
+    if (ctx.moves.has('cycle') && ['mini', 'maxi'].includes(item.length)) { score -= 1.5; notes.push(`A ${item.length} ${t.label.toLowerCase()} can be tricky on a bike`); }
+    if (ctx.windy && item.length === 'mini') { score -= 0.5; notes.push(`Windy (${r0(ctx.weather.windMax)} km/h) — a mini may be fiddly`); }
   }
-  if (item.slot === 'outer' && ctx.moves.has('cycle') && ['trench', 'wool_coat'].includes(item.type) && item.cut !== 'cropped') score -= 0.4;
+  if (item.slot === 'outer' && ctx.moves.has('cycle') && ['trench', 'wool_coat'].includes(item.type) && item.length !== 'short') score -= 0.4;
   // Style preferences: gentle nudges, never rules.
   const st = new Set(ctx.prefs.style || []);
   if (st.has('relaxed') && ['oversized', 'wide-leg', 'baggy', 'chunky'].includes(item.cut)) score += 0.4;

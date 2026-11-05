@@ -1,24 +1,33 @@
 import { html, raw, toString, esc } from './html.js';
-import { SLOTS, TYPES, TYPE, COLORS, COLOR, PATTERNS, FORMALITY, WARMTH_LABELS, illustration, typesForSlot, colorLabel, nearestColor, defaultItemFields } from './catalog.js';
+import { SLOTS, TYPES, TYPE, COLORS, COLOR, PATTERNS, FORMALITY, WARMTH_LABELS, STARTER_BASICS, COLLECTIONS, illustration, typesForSlot, colorLabel, nearestColor, defaultItemFields, orderTypes, typeRank, orderedCuts, defaultCut, defaultLength, cutLabel, lengthLabel, cutWarmth } from './catalog.js';
 import { db, save, uid, createItem, getItem, updateItem, deleteItem, resetAll, putPhoto, deletePhoto, photoUrls, loadPhotos, processUpload, exportData, itemName } from './store.js';
 import { geocode, getForecastWindow, manualWeather } from './weather.js';
-import { PROVIDERS } from './archive.js';
+import { curatedSearch, parseQuery, commonsProvider, SLOT_LABEL } from './archive.js';
+import { EXAMPLE, EXAMPLES } from './starter-catalog.js';
+import { garmentImg, hydrateGarments, imageSource } from './garments.js';
 import { PRESETS, MOVES, OUTDOOR, planFromPreset, rememberPlan, interpretNote } from './plan.js';
-import { buildContext, recommend, alternatives, rescore, outfitItems, outfitKey, pairKey, FAIL_TEXT, wp } from './recommender.js';
+import { buildContext, recommend, alternatives, rescore, outfitItems, outfitKey, pairKey, wardrobeGaps, FAIL_TEXT, wp } from './recommender.js';
 
 // ---------------------------------------------------------------- state
 const S = {
   tab: 'today',
-  view: null, // sub-page: 'starter' | 'archive'
-  starter: { idx: 0, mode: 'onboard' },
-  onboardStep: 'welcome', // welcome | starter | prefs
+  view: null, // sub-page: 'starter' | 'catalog'
+  scrollTo: null, // element id to bring into view after the next render
+  onboardStep: 'welcome', // welcome | collection | starter | next
   sheet: null,
   toast: null,
   today: freshToday(),
   wardrobeFilter: 'all',
-  archive: { provider: 'commons', slot: '', type: '', cut: '', color: '', query: '', results: [], status: 'idle', error: null, nextOffset: null },
+  cat: freshCatalog(),
+  moreColors: false, // "More colours" expanded in colour pickers
   loc: { q: '', results: [], status: 'idle', error: null },
 };
+
+// Catalogue search state. source: 'curated' (default) | 'online'.
+function freshCatalog(over = {}) {
+  return { source: 'curated', query: '', slot: '', type: '', types: [], cut: '', length: '', color: '', pattern: '', ignored: [], limit: 30, replaceId: null,
+    online: { status: 'idle', results: [], hidden: null, error: null, nextOffset: null }, ...over };
+}
 
 function freshToday() {
   return { stage: 'pick', plan: null, editing: false, weather: { status: 'idle' }, manual: { low: 10, high: 16, rain: false, windy: false }, result: null, shown: [], locks: {}, exclude: new Set(), session: { thermal: 0, formality: 0 }, justWore: null };
@@ -57,15 +66,95 @@ function icon(name) {
   return raw(`<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`);
 }
 
+// The catalogue ordering preference; never used to hide anything.
+const coll = () => db.prefs.collection || 'all';
+const gimg = (v, cls) => garmentImg(v, cls, coll());
+
+// Every garment image sits in the same neutral frame. Images are contained
+// (never stretched or cropped) unless the user zoomed in with the framing controls.
+function framed(inner, frame, cls = '') {
+  const f = frame || {};
+  return html`<span class="frame ${cls}" style="--z:${f.zoom || 1};--x:${f.x ?? 50}%;--y:${f.y ?? 50}%">${inner}</span>`;
+}
+
 function itemImg(item, cls = '') {
   if (!item) return '';
   const im = item.image || {};
-  if (im.kind === 'photo' && photoUrls.get(im.photoId)) return html`<img class="item-img ${cls}" src="${photoUrls.get(im.photoId)}" alt="">`;
-  if (im.kind === 'archive' && im.thumb) return html`<img class="item-img ${cls}" src="${im.thumb}" alt="" loading="lazy" referrerpolicy="no-referrer" data-fallback="${item.id}">`;
-  return illustration(item.type, item.color, item.cut, item.pattern, cls);
+  if (im.kind === 'photo' && photoUrls.get(im.photoId)) return framed(html`<img src="${photoUrls.get(im.photoId)}" alt="">`, im.frame, cls);
+  if (im.kind === 'archive' && im.thumb) return framed(html`<img src="${im.thumb}" alt="" loading="lazy" referrerpolicy="no-referrer" data-fallback="${item.id}">`, im.frame, cls);
+  return gimg(item, cls);
 }
 
-const sourceLabel = (item) => ({ photo: 'Your photo', archive: 'Archive image', illustration: 'Illustration' }[item.image?.kind] || 'Illustration');
+const CATALOG_SOURCE = { photo: 'Catalog photo', generated: 'Generated stand-in', illustration: 'Illustrated stand-in' };
+const sourceLabel = (item) => ({ photo: 'Your photo', archive: 'Online archive photo' }[item.image?.kind] || CATALOG_SOURCE[imageSource(item, coll())]);
+const APPROX_NOTE = 'Choose the closest match to your garment. You can replace it with your own photo later.';
+
+// Cut and length choices as image tiles, so e.g. wide-leg and baggy look different.
+function cutTiles(act, v) {
+  const t = TYPE[v.type];
+  if (t.cuts.length < 2) return '';
+  return html`<h4>Cut / fit</h4><div class="cut-grid" role="radiogroup" aria-label="Cut / fit">${orderedCuts(t, coll()).map((c) => html`
+    <button type="button" role="radio" aria-checked="${String(c === v.cut)}" class="cut-tile ${c === v.cut ? 'on' : ''}" data-act="${act}" data-v="${c}">
+      ${gimg({ ...v, cut: c, color: v.color || t.starter[0] })}<span>${cutLabel(t, c)}</span></button>`)}</div>`;
+}
+
+function lengthTiles(act, v) {
+  const t = TYPE[v.type];
+  if (!t.lengths) return '';
+  return html`<h4>Length</h4><div class="cut-grid" role="radiogroup" aria-label="Length">${t.lengths.map((l) => html`
+    <button type="button" role="radio" aria-checked="${String(l === v.length)}" class="cut-tile ${l === v.length ? 'on' : ''}" data-act="${act}" data-v="${l}">
+      ${gimg({ ...v, length: l, color: v.color || t.starter[0] })}<span>${lengthLabel(t, l)}</span></button>`)}</div>`;
+}
+
+// Named colour chips: a compact core palette, "More colours", and multicolour.
+function colorPicker(act, selected, { multi = false } = {}) {
+  const sel = multi ? selected : [selected];
+  const chip = (c) => html`<button type="button" class="color-chip ${sel.includes(c.id) ? 'on' : ''}" aria-pressed="${String(sel.includes(c.id))}" data-act="${act}" data-v="${c.id}"><span class="dot" style="--c:${c.css || c.hex}"></span>${c.label}</button>`;
+  const shown = COLORS.filter((c) => S.moreColors || c.core || sel.includes(c.id));
+  return html`<div class="color-chips">${shown.map(chip)}
+    <button type="button" class="color-chip more" data-act="toggleMoreColors" aria-expanded="${String(S.moreColors)}">${S.moreColors ? 'Fewer colours' : `More colours (${COLORS.length - shown.length})`}</button></div>`;
+}
+
+// Thickness maps onto the warmth scale around the type's typical value.
+// "Not sure" keeps the typical value and leaves it marked as estimated.
+const THICKNESS = [{ id: 'thin', label: 'Thin' }, { id: 'medium', label: 'Medium' }, { id: 'thick', label: 'Thick' }, { id: 'unsure', label: 'Not sure' }];
+function warmthFor(t, cut, thickness) {
+  const base = cutWarmth(t, cut);
+  return Math.max(1, Math.min(5, base + ({ thin: -1, thick: 1 }[thickness] || 0)));
+}
+
+// Framing for photos: zoom and position only change how the image sits in
+// its frame; the stored photo is untouched.
+function frameControls(frame, prefix) {
+  const f = frame || {};
+  return html`<div class="frame-controls">
+    <label>Zoom<input type="range" min="1" max="3" step="0.05" value="${f.zoom || 1}" data-input="${prefix}Zoom"></label>
+    <label>Left / right<input type="range" min="0" max="100" value="${f.x ?? 50}" data-input="${prefix}X"></label>
+    <label>Up / down<input type="range" min="0" max="100" value="${f.y ?? 50}" data-input="${prefix}Y"></label>
+    <button type="button" class="link small" data-act="${prefix}Reset">Reset framing</button>
+  </div>`;
+}
+
+// Short names for the categories an outfit still needs.
+const GAP_SHORT = { top: 'a top', bottom: 'bottoms', shoes: 'shoes' };
+const outfitGaps = () => wardrobeGaps(owned());
+
+function gapsCard(gaps, title) {
+  return html`<div class="card problem"><h3>${title}</h3>
+    <p class="small">To build a complete outfit I still need:</p>
+    <ul>${gaps.map((g) => html`<li>${cap(g.text)}${g.unavailable ? html` <span class="muted small">— yours are all marked unavailable or in the laundry</span>` : ''}</li>`)}</ul>
+    <div class="row gap wrap">${gaps.map((g) => html`<button type="button" class="btn sm" data-act="openStarterSlot" data-v="${g.slot}">Add ${GAP_SHORT[g.slot]}</button>`)}
+    ${gaps.some((g) => g.unavailable) ? html`<button type="button" class="btn sm ghost" data-act="tab" data-v="wardrobe">Check laundry</button>` : ''}</div></div>`;
+}
+
+function cantFind(slot = '') {
+  return html`<div class="cant-find">
+    <strong>Can't find your item?</strong>
+    <div class="row gap wrap">
+      <button type="button" class="btn sm" data-act="openCatalog" data-v="${slot}">${icon('search')} Search the larger catalog</button>
+      <button type="button" class="btn sm" data-act="openUpload">${icon('camera')} Upload a photo</button>
+    </div></div>`;
+}
 const formalityRange = (f) => (f[0] === f[1] ? FORMALITY[f[0]].label : `${FORMALITY[f[0]].label} – ${FORMALITY[f[1]].label}`);
 
 function seg(act, options, value, extra = '') {
@@ -74,12 +163,6 @@ function seg(act, options, value, extra = '') {
 
 function chips(act, options, values) {
   return html`<div class="chips">${options.map((o) => html`<button type="button" class="chip ${values.includes(o.id) ? 'on' : ''}" aria-pressed="${String(values.includes(o.id))}" data-act="${act}" data-v="${o.id}">${o.label}</button>`)}</div>`;
-}
-
-function swatches(act, selected, { multi = false, highlight = [] } = {}) {
-  const sel = multi ? selected : [selected];
-  const order = [...COLORS].sort((a, b) => (highlight.includes(b.id) ? 1 : 0) - (highlight.includes(a.id) ? 1 : 0));
-  return html`<div class="swatches">${order.map((c) => html`<button type="button" class="swatch ${sel.includes(c.id) ? 'on' : ''}" style="--c:${c.hex}" aria-pressed="${String(sel.includes(c.id))}" aria-label="${c.label}" title="${c.label}" data-act="${act}" data-v="${c.id}"><span></span></button>`)}</div>`;
 }
 
 function toast(msg, ms = 3200) {
@@ -114,9 +197,10 @@ function render() {
 function renderInner() {
   const onboarding = !db.prefs.onboarded;
   let body;
-  if (onboarding) body = viewOnboarding();
-  else if (S.view === 'starter') body = viewStarter();
-  else if (S.view === 'archive') body = viewArchive();
+  // The catalogue is reachable during onboarding too, so sub-views come first.
+  if (S.view === 'starter') body = viewStarter();
+  else if (S.view === 'catalog') body = viewCatalog();
+  else if (onboarding) body = viewOnboarding();
   else body = { today: viewToday, wardrobe: viewWardrobe, outfits: viewOutfits, profile: viewProfile }[S.tab]();
   const nav = onboarding || S.view ? '' : html`
     <nav class="tabbar" aria-label="Main">
@@ -124,6 +208,16 @@ function renderInner() {
         <button type="button" class="${S.tab === id ? 'on' : ''}" data-act="tab" data-v="${id}" aria-current="${S.tab === id ? 'page' : 'false'}">${icon(id)}<span>${label}</span></button>`)}
     </nav>`;
   $app.innerHTML = toString(html`<main class="screen ${S.view ? 'sub' : ''}">${body}</main>${nav}`);
+  hydrateGarments($app);
+  // Keep the chosen chip visible in horizontally scrolling filter rows.
+  $app.querySelectorAll('.chips.scroll-x').forEach((row) => {
+    const on = row.querySelector('.on');
+    if (on) row.scrollLeft = on.offsetLeft - row.offsetLeft - 16;
+  });
+  if (S.scrollTo) {
+    document.getElementById(S.scrollTo)?.scrollIntoView({ block: 'start' });
+    S.scrollTo = null;
+  }
   renderSheet();
 }
 
@@ -141,6 +235,7 @@ function renderSheet() {
   else $sheet.innerHTML = toString(html`<div class="backdrop" data-act="closeSheet"></div>
     <section class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title" data-kind="${S.sheet.type}">${fn(S.sheet)}</section>`);
   document.body.classList.add('sheet-open');
+  hydrateGarments($sheet);
   const sb = $sheet.querySelector('.sheet-body');
   if (sb) sb.scrollTop = scroll;
   if (!wasOpen || !existing || existing.dataset.kind !== S.sheet.type) $sheet.querySelector('.sheet h2')?.focus();
@@ -155,45 +250,58 @@ function sheetHead(title, sub) {
 function viewOnboarding() {
   if (S.onboardStep === 'welcome') {
     return html`<section class="welcome">
-      <div class="welcome-art">${illustration('shirt', 'white')}${illustration('jeans', 'denim', 'wide-leg')}${illustration('sneakers', 'white')}</div>
+      <div class="welcome-art">${illustration({ type: 'shirt', color: 'white' })}${illustration({ type: 'jeans', color: 'denim', cut: 'wide-leg' })}${illustration({ type: 'sneakers', color: 'white' })}</div>
       <h1>Less time deciding what to wear</h1>
       <p class="lead">Tell me roughly what's in your wardrobe and where you're going. I'll check the weather for the hours you're out and suggest outfits from clothes you actually own.</p>
       <ul class="ticks">
-        <li>${icon('check')} Start with a few basics — about two minutes</li>
-        <li>${icon('check')} No photos needed to begin; add them later if you like</li>
+        <li>${icon('check')} Start with a few everyday pieces — no need to add everything</li>
+        <li>${icon('check')} Can't find something? Search the larger catalog or upload a photo</li>
         <li>${icon('check')} No account: everything stays on this device</li>
       </ul>
-      <button type="button" class="btn primary block" data-act="startOnboard">Pick my basics</button>
+      <button type="button" class="btn primary block" data-act="startOnboard">Get started</button>
     </section>`;
   }
-  if (S.onboardStep === 'prefs') return viewOnboardPrefs();
+  if (S.onboardStep === 'collection') return viewCollectionStep();
+  if (S.onboardStep === 'next') return viewNextSteps();
   return viewStarter();
 }
 
-function viewOnboardPrefs() {
-  const p = db.prefs;
-  return html`<section class="pad">
-    <p class="eyebrow">Almost done</p>
-    <h1>A couple of preferences</h1>
-    <p class="muted">Optional — you can change these any time under “You”.</p>
-    <div class="card">
-      <h3>Where are you usually?</h3>
-      <p class="muted small">Used only to fetch the forecast.</p>
-      ${locationPicker()}
+const COLLECTION_HINTS = {
+  womenswear: 'Womenswear cuts and pieces like blouses, skirts and dresses first',
+  menswear: 'Menswear cuts and pieces like shirts, chinos and oxfords first',
+  all: 'Everything together, in a neutral order',
+};
+
+function viewCollectionStep() {
+  return html`<section class="pad collection-step">
+    <header class="subhead"><button type="button" class="icon-btn" data-act="onboardBack" aria-label="Back">${icon('back')}</button>
+      <div><p class="eyebrow">Optional</p><h1>Which collection would you like to see first?</h1></div></header>
+    <p class="muted">This only changes what's shown first. Every garment stays available, and you can switch any time.</p>
+    <div class="coll-list">${COLLECTIONS.map((c) => html`<button type="button" class="preset ${db.prefs.collection === c.id ? 'on' : ''}" data-act="pickCollection" data-v="${c.id}">
+      <span class="preset-title">${c.label}</span><span class="muted small">${COLLECTION_HINTS[c.id]}</span></button>`)}</div>
+    <button type="button" class="btn ghost block" data-act="pickCollection" data-v="">Skip</button>
+  </section>`;
+}
+
+function viewNextSteps() {
+  const n = owned().length;
+  const gaps = outfitGaps();
+  return html`<section class="pad next-steps">
+    <header class="subhead"><button type="button" class="icon-btn" data-act="onboardBack" aria-label="Back to basics">${icon('back')}</button>
+      <div><p class="eyebrow">${n} item${n === 1 ? '' : 's'} added</p><h1>${gaps.length ? 'Almost there' : 'Ready for your first outfits'}</h1></div></header>
+    <p class="muted">You don't need to add everything now — more items just means more variety. Add things whenever you like from the Wardrobe tab.</p>
+    ${gaps.length ? gapsCard(gaps, 'One more step for outfit ideas') : ''}
+    <button type="button" class="btn primary block" data-act="finishOnboard" ${gaps.length ? 'disabled' : ''}>Get my first outfit suggestions</button>
+    <div class="add-row col next-opts">
+      <button type="button" class="add-opt" data-act="openCatalog">${icon('search')}<span><strong>Add more from the catalog</strong><small>Every type, cut and colour, plus online photos</small></span></button>
+      <button type="button" class="add-opt" data-act="openUpload">${icon('camera')}<span><strong>Upload a photo</strong><small>Of your own garment — it stays on this device</small></span></button>
     </div>
-    <div class="card">
-      <h3>Do you tend to feel…</h3>
-      ${seg('setThermal', [{ id: 'cold', label: 'Cold easily' }, { id: 'neutral', label: 'About average' }, { id: 'warm', label: 'Warm easily' }], p.thermal)}
-    </div>
-    <div class="card">
-      <h3>Your style, loosely</h3>
-      <p class="muted small">A gentle nudge for suggestions, not a rule.</p>
-      ${chips('toggleStyle', STYLE_OPTS, p.style)}
-    </div>
-    <div class="row gap">
-      <button type="button" class="btn ghost" data-act="onboardBack">Back</button>
-      <button type="button" class="btn primary grow" data-act="finishOnboard">Plan my day</button>
-    </div>
+    <details class="card optional">
+      <summary><strong>Optional:</strong> how do you usually feel the temperature?</summary>
+      ${seg('setThermal', [{ id: 'cold', label: 'Cold easily' }, { id: 'neutral', label: 'About average' }, { id: 'warm', label: 'Warm easily' }], db.prefs.thermal)}
+      <p class="muted small">Change this, your style and your city any time under “You”.</p>
+    </details>
+    ${gaps.length ? html`<button type="button" class="link small finish-later" data-act="finishLater">Finish later and look around</button>` : ''}
   </section>`;
 }
 
@@ -220,74 +328,78 @@ function locationPicker() {
   </div>`;
 }
 
-// ---------------------------------------------------------------- starter catalogue
-const STARTER_SLOTS = ['top', 'bottom', 'layer', 'outer', 'shoes', 'dress'];
+// ---------------------------------------------------------------- starter basics
+const STARTER_SLOTS = ['top', 'bottom', 'dress', 'layer', 'outer', 'shoes'];
+
+function typeTile(t, inSlot) {
+  const n = inSlot.filter((i) => i.type === t.id).length;
+  return html`<button type="button" class="type-tile" data-act="openQuick" data-type="${t.id}">
+    <span class="tile-img">${gimg({ type: t.id, color: t.starter[0], cut: defaultCut(t, coll()), length: defaultLength(t) })}</span>
+    <span>${t.label}</span>
+    ${n ? html`<b class="badge" aria-label="${n} added">${n}</b>` : ''}
+  </button>`;
+}
 
 function viewStarter() {
-  const st = S.starter;
-  const slotId = STARTER_SLOTS[st.idx];
-  const slot = SLOTS.find((s) => s.id === slotId);
-  const inSlot = owned().filter((i) => i.slot === slotId);
-  const onboard = st.mode === 'onboard';
-  const last = st.idx === STARTER_SLOTS.length - 1;
+  const onboard = !db.prefs.onboarded;
+  const items = owned();
+  const gaps = outfitGaps();
+  // Categories with nothing from the preferred collection move to the end.
+  const sections = STARTER_SLOTS.map((slotId) => {
+    const types = orderTypes(STARTER_BASICS[slotId].map((id) => TYPE[id]), coll());
+    return { slot: SLOTS.find((s) => s.id === slotId), main: types.filter((t) => !typeRank(t, coll())), more: types.filter((t) => typeRank(t, coll())) };
+  }).sort((a, b) => (a.main.length ? 0 : 1) - (b.main.length ? 0 : 1));
   return html`<section class="pad starter">
     <header class="subhead">
-      ${onboard ? '' : html`<button type="button" class="icon-btn" data-act="closeView" aria-label="Back">${icon('back')}</button>`}
-      <div>
-        <p class="eyebrow">${onboard ? `Step ${st.idx + 1} of ${STARTER_SLOTS.length}` : 'Quick basics'}</p>
-        <h1>${slot.step}</h1>
-      </div>
+      ${onboard ? html`<button type="button" class="icon-btn" data-act="onboardBack" aria-label="Back">${icon('back')}</button>` : html`<button type="button" class="icon-btn" data-act="closeView" aria-label="Back">${icon('back')}</button>`}
+      <div><p class="eyebrow">${onboard ? 'Your wardrobe' : 'Starter basics'}</p><h1>Everyday basics</h1></div>
     </header>
-    ${onboard ? html`<div class="progress" aria-hidden="true">${STARTER_SLOTS.map((_, i) => html`<span class="${i <= st.idx ? 'on' : ''}"></span>`)}</div>` : html`
-      <div class="chips scroll-x">${STARTER_SLOTS.map((s, i) => html`<button type="button" class="chip ${i === st.idx ? 'on' : ''}" data-act="starterGo" data-i="${i}">${SLOTS.find((x) => x.id === s).label}</button>`)}</div>`}
-    <p class="muted">Tap what you own. Pick every colour you have — approximate is fine.</p>
-    <div class="type-grid">
-      ${typesForSlot(slotId).map((t) => {
-        const n = inSlot.filter((i) => i.type === t.id).length;
-        return html`<button type="button" class="type-tile" data-act="openQuick" data-type="${t.id}">
-          ${illustration(t.id, t.starter[0], t.defaultCut)}
-          <span>${t.label}</span>
-          ${n ? html`<b class="badge" aria-label="${n} added">${n}</b>` : ''}
-        </button>`;
-      })}
-    </div>
-    ${inSlot.length ? html`<div class="added"><h3>Added (${inSlot.length})</h3><ul class="mini-list">${inSlot.map((i) => html`
-      <li>${itemImg(i, 'xs')}<span>${cap(i.name)}</span><button type="button" class="icon-btn sm" data-act="removeItem" data-id="${i.id}" aria-label="Remove ${i.name}">${icon('close')}</button></li>`)}</ul></div>` : ''}
-    <div class="sticky-actions">
-      ${onboard ? html`
-        <button type="button" class="btn ghost" data-act="starterPrev">${st.idx === 0 ? 'Back' : 'Back'}</button>
-        <button type="button" class="btn ${inSlot.length ? 'primary' : ''} grow" data-act="starterNext">${last ? (inSlot.length ? 'Next' : 'Skip & continue') : inSlot.length ? 'Next' : 'Skip for now'}</button>`
-      : html`<button type="button" class="btn primary grow" data-act="closeView">Done</button>`}
+    <p class="intro">Start with a few everyday pieces. If you don't see your item, search the larger catalog or upload your own photo.</p>
+    ${cantFind()}
+    <div class="coll-bar"><span class="muted small">Show first</span>${seg('setCollection', COLLECTIONS.map((c) => ({ id: c.id, label: c.id === 'all' ? 'All' : c.label })), coll())}</div>
+    <p class="muted small approx">${APPROX_NOTE}</p>
+    ${sections.map(({ slot, main, more }) => {
+      const inSlot = items.filter((i) => i.slot === slot.id);
+      return html`<section class="cat" id="cat-${slot.id}" aria-labelledby="cat-h-${slot.id}">
+        <h2 id="cat-h-${slot.id}">${slot.step}${inSlot.length ? html` <span class="muted small">· ${inSlot.length} added</span>` : ''}</h2>
+        <div class="type-grid">
+          ${main.map((t) => typeTile(t, inSlot))}
+          ${main.length ? '' : more.map((t) => typeTile(t, inSlot))}
+          <button type="button" class="type-tile other" data-act="openCatalog" data-v="${slot.id}">${icon('search')}<span>Other ${slot.label.toLowerCase()}</span></button>
+        </div>
+        ${main.length && more.length ? html`<h4>More styles</h4><div class="type-grid">${more.map((t) => typeTile(t, inSlot))}</div>` : ''}
+        ${inSlot.length ? html`<ul class="mini-list">${inSlot.map((i) => html`
+          <li>${itemImg(i, 'xs')}<span>${cap(i.name)}</span><button type="button" class="icon-btn sm" data-act="removeItem" data-id="${i.id}" aria-label="Remove ${i.name}">${icon('close')}</button></li>`)}</ul>` : ''}
+      </section>`;
+    })}
+    <div class="sticky-actions readiness-bar">
+      <p class="small ready-status ${gaps.length ? '' : 'ok'}" role="status">${gaps.length
+        ? html`Still needed for an outfit: ${gaps.map((g, i) => html`${i ? ', ' : ''}<button type="button" class="link" data-act="scrollSlot" data-v="${g.slot}">${GAP_SHORT[g.slot]}</button>`)}`
+        : html`${icon('check')} Ready for outfit suggestions`}</p>
+      <button type="button" class="btn ${gaps.length && onboard ? '' : 'primary'} block" data-act="${onboard ? 'starterDone' : 'closeView'}">${onboard ? 'Continue' : 'Done'}</button>
     </div>
   </section>`;
 }
 
 const SHEETS = {};
 
-SHEETS.quick = (s) => {
-  const t = TYPE[s.typeId];
-  return html`${sheetHead(`Add ${t.label.toLowerCase()}`, 'Choose every colour you own — each becomes its own item.')}
-  <div class="sheet-body">
-    <div class="quick-preview">${(s.colors.length ? s.colors : [t.starter[0]]).slice(0, 4).map((c) => illustration(t.id, c, s.cut, s.pattern))}</div>
-    ${t.cuts.length > 1 ? html`<h3>Cut / fit</h3>${seg('quickCut', t.cuts.map((c) => ({ id: c, label: cap(c) })), s.cut)}` : ''}
-    <h3>Colours <span class="muted small">(${s.colors.length} selected)</span></h3>
-    ${swatches('quickColor', s.colors, { multi: true, highlight: t.starter })}
-    <h3>Pattern</h3>
-    ${seg('quickPattern', PATTERNS, s.pattern)}
-  </div>
-  <footer class="sheet-foot">
-    <button type="button" class="btn primary block" data-act="quickAdd" ${s.colors.length ? '' : 'disabled'}>${s.colors.length ? `Add ${s.colors.length} item${s.colors.length > 1 ? 's' : ''} I own` : 'Pick at least one colour'}</button>
-  </footer>`;
-};
-
 // ---------------------------------------------------------------- today
 function viewToday() {
   if (!owned().length) {
     return html`<section class="pad empty">
-      ${illustration('tshirt', 'cream')}
+      ${illustration({ type: 'tshirt', color: 'cream' })}
       <h1>Your wardrobe is empty</h1>
-      <p class="muted">Add a few basics and I can start suggesting outfits.</p>
-      <button type="button" class="btn primary" data-act="openStarter">Add basics</button>
+      <p class="muted">Add a few everyday pieces and I can start suggesting outfits.</p>
+      <button type="button" class="btn primary" data-act="openAddMenu">${icon('plus')} Add clothing</button>
+    </section>`;
+  }
+  const gaps = outfitGaps();
+  if (gaps.length && S.today.stage === 'pick') {
+    return html`<section class="pad today">
+      ${feedbackPrompt()}
+      <h1 class="big">Almost ready for outfit ideas</h1>
+      ${gapsCard(gaps, 'A few more pieces needed')}
+      <p class="muted small">You don't have to add your whole wardrobe — just enough for one complete outfit.</p>
     </section>`;
   }
   const T = S.today;
@@ -439,13 +551,7 @@ function justWoreCard() {
 }
 
 function problemCard(R) {
-  if (R.problem.kind === 'incomplete') {
-    return html`<div class="card problem"><h3>I can't build a full outfit yet</h3>
-      <p>To suggest something wearable I still need:</p>
-      <ul>${R.problem.gaps.map((g) => html`<li>${cap(g.text)}${g.unavailable ? html` <span class="muted small">— yours are all marked unavailable or in the laundry</span>` : ''}</li>`)}</ul>
-      <div class="row gap wrap">${R.problem.gaps.map((g) => html`<button type="button" class="btn sm" data-act="openStarterSlot" data-v="${g.slot}">Add ${SLOTS.find((s) => s.id === g.slot).label.toLowerCase()}</button>`)}
-      ${R.problem.gaps.some((g) => g.unavailable) ? html`<button type="button" class="btn sm ghost" data-act="tab" data-v="wardrobe">Check laundry</button>` : ''}</div></div>`;
-  }
+  if (R.problem.kind === 'incomplete') return gapsCard(R.problem.gaps, "I can't build a full outfit yet");
   return html`<div class="card problem"><h3>No outfit really works today</h3>
     ${R.problem.lines.map((l) => html`<p>${l}</p>`)}
     <p class="muted small">Rather than suggest something unsuitable, here's what's missing. You can also adjust your plan above.</p></div>`;
@@ -456,7 +562,7 @@ function suggestionsBox(list) {
   return html`<aside class="card ideas" aria-label="Not in your wardrobe">
     <p class="eyebrow">Not in your wardrobe · ideas only</p>
     ${list.map((s) => html`<div class="idea">
-      ${s.type ? illustration(s.type, 'charcoal') : ''}
+      ${s.type ? illustration({ type: s.type, color: 'charcoal' }) : ''}
       <div class="grow"><p class="small">${s.text}</p>
       <div class="row gap wrap"><button type="button" class="link small" data-act="openQuick" data-type="${s.type}">I own one — add it</button>
       <button type="button" class="link small" data-act="addWish" data-type="${s.type}" data-text="${s.text}">Save to wishlist</button></div></div></div>`)}
@@ -637,8 +743,9 @@ function startPlan(plan) {
 function readiness() {
   const av = owned();
   const any = (f) => av.some(f);
+  const gaps = outfitGaps();
   return [
-    { id: 'basics', label: 'Everyday outfits', ok: (any((i) => i.slot === 'top') && any((i) => i.slot === 'bottom')) || any((i) => i.slot === 'dress') ? any((i) => i.slot === 'shoes') : false, fix: !any((i) => i.slot === 'shoes') ? 'shoes' : !any((i) => i.slot === 'top') ? 'top' : 'bottom', hint: 'Needs a top, bottoms and shoes' },
+    { id: 'basics', label: 'Everyday outfits', ok: !gaps.length, fix: gaps[0]?.slot, hint: `Still needs ${gaps.map((g) => GAP_SHORT[g.slot]).join(', ')}` },
     { id: 'cold', label: 'Cold days', ok: any((i) => i.slot === 'outer' && i.warmth >= 4) || (any((i) => i.slot === 'outer' && i.warmth >= 3) && any((i) => i.slot === 'layer' && i.warmth >= 3)), fix: 'outer', type: 'wool_coat', hint: 'A warm coat, or a jacket plus a thick layer' },
     { id: 'rain', label: 'Rainy days', ok: any((i) => i.slot === 'outer' && i.water === 'yes'), fix: 'outer', type: 'rain_jacket', hint: 'A water-resistant jacket (or mark one you own as water-resistant)' },
     { id: 'smart', label: 'Smarter plans', ok: ['top', 'bottom', 'shoes'].every((s) => any((i) => (i.slot === s || (s !== 'shoes' && i.slot === 'dress')) && i.formality[1] >= 4)), fix: 'bottom', type: 'trousers', hint: 'Smart top, bottoms and shoes' },
@@ -660,11 +767,6 @@ function viewWardrobe() {
       <ul>${ready.map((r) => html`<li class="${r.ok ? 'ok' : 'todo'}">${r.ok ? icon('check') : html`<span class="dot"></span>`}<span class="grow">${r.label}${r.ok ? '' : html`<span class="muted small"> — ${r.hint}</span>`}</span>
         ${r.ok ? '' : html`<button type="button" class="link small" data-act="${r.type ? 'openQuick' : 'openStarterSlot'}" data-type="${r.type || ''}" data-v="${r.fix}">Add</button>`}</li>`)}</ul>
     </details>
-    <div class="add-row">
-      <button type="button" class="add-opt" data-act="openStarter">${icon('grid')}<span><strong>Quick basics</strong><small>Pick type & colour</small></span></button>
-      <button type="button" class="add-opt" data-act="openArchive">${icon('search')}<span><strong>Browse archive</strong><small>Find a closer image</small></span></button>
-      <button type="button" class="add-opt" data-act="openUpload">${icon('camera')}<span><strong>Upload photo</strong><small>Of your own item</small></span></button>
-    </div>
     <div class="chips scroll-x" role="toolbar" aria-label="Filter">
       <button type="button" class="chip ${f === 'all' ? 'on' : ''}" data-act="wFilter" data-v="all">All</button>
       ${SLOTS.filter((s) => counts[s.id]).map((s) => html`<button type="button" class="chip ${f === s.id ? 'on' : ''}" data-act="wFilter" data-v="${s.id}">${s.label} ${counts[s.id]}</button>`)}
@@ -673,18 +775,19 @@ function viewWardrobe() {
     ${shown.length ? html`<div class="item-grid">${shown.map((i) => html`<button type="button" class="item-card ${i.status !== 'available' ? 'dim' : ''}" data-act="openEdit" data-id="${i.id}">
       <div class="img-wrap">${itemImg(i)}${i.status !== 'available' ? html`<span class="status">${i.status === 'laundry' ? 'In laundry' : 'Unavailable'}</span>` : ''}</div>
       <span class="name">${cap(i.name)}</span><span class="muted tiny">${sourceLabel(i)}</span></button>`)}</div>`
-    : html`<p class="muted empty-inline">${items.length ? 'Nothing here.' : 'No items yet — start with quick basics.'}</p>`}
+    : html`<p class="muted empty-inline">${items.length ? 'Nothing here.' : 'No items yet — tap “Add clothing” to start with a few basics.'}</p>`}
     ${db.wishlist.length ? html`<section class="wishlist"><h2>Wishlist <span class="muted small">· not owned, never used in outfits</span></h2>
-      <ul class="mini-list">${db.wishlist.map((w) => html`<li>${illustration(w.type, 'charcoal', null, 'solid', 'xs')}<span class="grow">${TYPE[w.type].label}<br><span class="muted tiny">${w.text}</span></span>
+      <ul class="mini-list">${db.wishlist.map((w) => html`<li>${illustration({ type: w.type, color: 'charcoal' }, 'xs')}<span class="grow">${TYPE[w.type].label}<br><span class="muted tiny">${w.text}</span></span>
       <button type="button" class="link small" data-act="wishOwned" data-id="${w.id}">I got it</button>
       <button type="button" class="icon-btn sm" data-act="wishRemove" data-id="${w.id}" aria-label="Remove from wishlist">${icon('close')}</button></li>`)}</ul></section>` : ''}
+    <button type="button" class="btn primary fab" data-act="openAddMenu">${icon('plus')} Add clothing</button>
   </section>`;
 }
 
 function typeSelect(act, value, { required = false } = {}) {
   return html`<select data-change="${act}" ${required ? 'required' : ''}>
     ${!value ? html`<option value="">Choose a type…</option>` : ''}
-    ${SLOTS.map((s) => html`<optgroup label="${s.label}">${typesForSlot(s.id).map((t) => html`<option value="${t.id}" ${t.id === value ? 'selected' : ''}>${t.label}</option>`)}</optgroup>`)}
+    ${SLOTS.map((s) => html`<optgroup label="${s.label}">${orderTypes(typesForSlot(s.id), coll()).map((t) => html`<option value="${t.id}" ${t.id === value ? 'selected' : ''}>${t.label}</option>`)}</optgroup>`)}
   </select>`;
 }
 
@@ -697,31 +800,38 @@ SHEETS.edit = (s) => {
   const t = TYPE[d.type];
   const est = d.estimated || {};
   const hint = (k) => (est[k] ? html`<span class="est">estimated — typical for this type</span>` : '');
-  return html`${sheetHead('Edit item', `${sourceLabel(d)}${d.image?.kind === 'archive' ? ` · ${d.image.license} · ${d.image.author}` : ''}`)}
+  const kind = d.image?.kind || 'catalog';
+  return html`${sheetHead('Edit item', `${sourceLabel(d)}${kind === 'archive' ? ` · ${d.image.license} · ${d.image.author}` : ''}`)}
   <div class="sheet-body edit">
     <div class="edit-photo">
-      <div class="img-wrap lg">${itemImg(d)}</div>
+      <div class="img-wrap lg">${itemImg(d, kind === 'catalog' ? '' : 'editable')}</div>
       <div class="stack">
-        <label class="btn sm">${icon('camera')} ${d.image?.kind === 'photo' ? 'Replace photo' : 'Use my own photo'}<input type="file" accept="image/jpeg,image/png,image/webp,image/heic" class="sr-only" data-change="editPhoto"></label>
-        ${d.image?.kind !== 'illustration' ? html`<button type="button" class="btn sm ghost" data-act="editRevertImg">Use illustration instead</button>` : ''}
-        ${d.image?.kind === 'archive' && d.image.pageUrl ? html`<a class="link small" href="${d.image.pageUrl}" target="_blank" rel="noopener noreferrer">Image source</a>` : ''}
+        <label class="btn sm">${icon('camera')} ${kind === 'photo' ? 'Replace photo' : 'Use my own photo'}<input type="file" accept="image/jpeg,image/png,image/webp,image/heic" class="sr-only" data-change="editPhoto"></label>
+        <button type="button" class="btn sm ghost" data-act="editFindImage">${icon('search')} Find in the catalog</button>
+        ${kind !== 'catalog' ? html`<button type="button" class="link small" data-act="editRevertImg">Use the catalog image</button>` : ''}
+        ${kind === 'archive' && d.image.pageUrl ? html`<a class="link small" href="${d.image.pageUrl}" target="_blank" rel="noopener noreferrer">Image source</a>` : ''}
+        ${d.sourceUrl ? html`<a class="link small" href="${d.sourceUrl}" target="_blank" rel="noopener noreferrer">Product link</a>` : ''}
         ${s.photoError ? html`<p class="error small" role="alert">${s.photoError}</p>` : ''}
         ${s.photoBusy ? html`<p class="muted small" role="status">Processing photo…</p>` : ''}
       </div>
     </div>
+    ${kind === 'catalog' ? '' : frameControls(d.image.frame, 'ed')}
+    <p class="muted tiny">${kind === 'catalog' ? 'Catalog images are approximate — you can replace this with your own photo any time. ' : ''}Changing the image or details keeps this item's saved outfits, history and feedback.</p>
     <label class="block-label">Name<input type="text" maxlength="60" value="${d.name}" data-input="editName"></label>
     <label class="block-label">Type${typeSelect('editType', d.type)}</label>
-    ${t.cuts.length > 1 ? html`<h4>Cut / fit</h4>${seg('editCut', t.cuts.map((c) => ({ id: c, label: cap(c) })), d.cut)}` : ''}
-    <h4>Colour</h4>${swatches('editColor', d.color)}
+    ${cutTiles('editCut', d)}
+    ${lengthTiles('editLength', d)}
+    <h4>Colour</h4>${colorPicker('editColor', d.color)}
     <h4>Pattern</h4>${seg('editPattern', PATTERNS, d.pattern)}
     <h4>Availability</h4>${seg('editStatus', [{ id: 'available', label: 'Available' }, { id: 'laundry', label: 'In laundry' }, { id: 'unavailable', label: 'Unavailable' }], d.status)}
-    ${['top', 'dress', 'layer', 'outer'].includes(d.slot) ? html`<h4>Warmth ${hint('warmth')}</h4>${seg('editWarmth', [1, 2, 3, 4, 5].map((v) => ({ id: String(v), label: WARMTH_LABELS[v] })), String(d.warmth))}` : ''}
+    ${d.slot !== 'shoes' ? html`<h4>Warmth ${hint('warmth')}</h4>${seg('editWarmth', [1, 2, 3, 4, 5].map((v) => ({ id: String(v), label: WARMTH_LABELS[v] })), est.warmth ? '' : String(d.warmth))}
+      ${est.warmth ? '' : html`<button type="button" class="link small" data-act="editWarmthUnsure">Not sure — use the typical value</button>`}` : ''}
     <h4>Dressiness ${hint('formality')}</h4>
     <div class="row gap"><label>From<select data-change="editFmin">${FORMALITY.slice(1).map((f) => html`<option value="${f.v}" ${f.v === d.formality[0] ? 'selected' : ''}>${f.label}</option>`)}</select></label>
     <label>To<select data-change="editFmax">${FORMALITY.slice(1).map((f) => html`<option value="${f.v}" ${f.v === d.formality[1] ? 'selected' : ''}>${f.label}</option>`)}</select></label></div>
     ${['outer', 'shoes'].includes(d.slot) ? html`<h4>Water-resistant? ${hint('water')}</h4>${triSelect('editWater', d.water)}` : ''}
     ${d.slot === 'shoes' ? html`<h4>Comfortable for long walks? ${hint('walk')}</h4>${triSelect('editWalk', d.walk)}<h4>OK for cycling? ${hint('cycle')}</h4>${triSelect('editCycle', d.cycle)}` : ''}
-    <p class="muted tiny">Warmth and water resistance can't be judged reliably from a picture — correct them if you know better.</p>
+    <p class="muted tiny">Warmth, water resistance and comfort can't be judged reliably from a picture — correct them if you know better.</p>
   </div>
   <footer class="sheet-foot row gap">
     <button type="button" class="btn danger ghost" data-act="editDelete">${s.confirmDelete ? 'Tap again to delete' : 'Delete'}</button>
@@ -729,100 +839,214 @@ SHEETS.edit = (s) => {
   </footer>`;
 };
 
-SHEETS.addMenu = () => html`${sheetHead('Add clothes')}
+SHEETS.addMenu = () => html`${sheetHead('Add clothing', "Add a few pieces at a time — you don't need your whole wardrobe.")}
   <div class="sheet-body"><div class="add-row col">
-    <button type="button" class="add-opt" data-act="openStarter">${icon('grid')}<span><strong>Quick basics</strong><small>Pick a type, cut and colours</small></span></button>
-    <button type="button" class="add-opt" data-act="openArchive">${icon('search')}<span><strong>Browse the archive</strong><small>Find an image closer to your item</small></span></button>
-    <button type="button" class="add-opt" data-act="openUpload">${icon('camera')}<span><strong>Upload a photo</strong><small>Of the actual garment</small></span></button>
+    <button type="button" class="add-opt" data-act="openStarter">${icon('grid')}<span><strong>Starter basics</strong><small>Common everyday pieces — pick cut and colours</small></span></button>
+    <button type="button" class="add-opt" data-act="openCatalog">${icon('search')}<span><strong>Search the catalog</strong><small>Filter by type, cut, length and colour</small></span></button>
+    <button type="button" class="add-opt" data-act="openUpload">${icon('camera')}<span><strong>Upload a photo</strong><small>Of your own garment — it stays on this device</small></span></button>
+    <button type="button" class="add-opt" data-act="openLink">${icon('pin')}<span><strong>Import from a product link</strong><small>Keep the link and add the product photo</small></span></button>
   </div></div>`;
 
-SHEETS.upload = (s) => html`${sheetHead('Add from a photo', 'A clear photo on a plain background works best. It stays on this device.')}
+const UPLOAD_INPUT = html`<input type="file" accept="image/jpeg,image/png,image/webp,image/heic" class="sr-only" data-change="uploadFile">`;
+
+SHEETS.upload = (s) => html`${sheetHead(s.link ? 'Import from a product link' : 'Add from a photo', s.link ? '' : 'A photo of the garment laid flat or on a hanger, against a plain background, works best. It stays on this device.')}
   <div class="sheet-body">
-    ${s.preview ? html`<div class="upload-preview"><img src="${s.preview}" alt="Your photo preview"></div>
-      <label class="link small">Choose a different photo<input type="file" accept="image/jpeg,image/png,image/webp,image/heic" class="sr-only" data-change="uploadFile"></label>`
-    : html`<label class="dropzone">${icon('camera')}<strong>Choose or take a photo</strong><span class="muted small">JPEG, PNG or WebP · up to 12 MB</span>
-      <input type="file" accept="image/jpeg,image/png,image/webp,image/heic" class="sr-only" data-change="uploadFile"></label>`}
+    ${s.link ? html`
+      <label class="block-label">Product page link<input type="url" inputmode="url" placeholder="https://…" value="${s.url || ''}" data-input="linkUrl"></label>
+      <div class="card limitation">
+        <p class="small"><strong>Automatic import isn't available.</strong> Reading a shop's page needs a server-side integration with retailers that permit it, and this app runs only on your device.</p>
+        <p class="small">Instead: save the product photo from the shop (or take a screenshot), then choose it below. The link is kept with the item so you can find it again.</p>
+      </div>` : ''}
+    <label class="dropzone">${icon('camera')}<strong>${s.link ? 'Choose the product photo' : 'Choose or take a photo'}</strong><span class="muted small">JPEG, PNG or WebP · up to 12 MB</span>${UPLOAD_INPUT}</label>
+    <p class="muted tiny">Automatic background removal isn't available yet. You'll be able to adjust the framing on the next step.</p>
     ${s.busy ? html`<p class="muted small" role="status">Processing…</p>` : ''}
     ${s.error ? html`<p class="error small" role="alert">${s.error}</p>` : ''}
-    ${s.preview ? html`
-      <label class="block-label">What is it?${typeSelect('upType', s.itemType, { required: true })}</label>
-      ${s.itemType && TYPE[s.itemType].cuts.length > 1 ? html`<h4>Cut / fit</h4>${seg('upCut', TYPE[s.itemType].cuts.map((c) => ({ id: c, label: cap(c) })), s.cut)}` : ''}
-      <h4>Colour ${s.colorSuggested ? html`<span class="est">suggested from your photo — check it</span>` : ''}</h4>
-      ${swatches('upColor', s.color)}
-      <h4>Pattern</h4>${seg('upPattern', PATTERNS, s.pattern)}
-      <p class="muted tiny">Warmth, dressiness and practical details are prefilled from the type. You can refine them after adding.</p>` : ''}
-  </div>
-  ${s.preview ? html`<footer class="sheet-foot"><button type="button" class="btn primary block" data-act="uploadAdd" ${s.itemType ? '' : 'disabled'}>${s.itemType ? 'Add to my wardrobe' : 'Choose a type first'}</button></footer>` : ''}`;
+  </div>`;
 
-// ---------------------------------------------------------------- archive
-function viewArchive() {
-  const A = S.archive;
-  const prov = PROVIDERS.find((p) => p.id === A.provider);
-  const typeOpts = TYPES.filter((t) => !A.slot || t.slot === A.slot);
-  const t = A.type ? TYPE[A.type] : null;
-  return html`<section class="pad archive">
+// ---------------------------------------------------------------- catalogue
+const CATEGORY_ICON = { top: 'tshirt', bottom: 'jeans', dress: 'dress', layer: 'sweater', outer: 'wool_coat', shoes: 'sneakers' };
+
+function exampleTitle(e) {
+  const t = TYPE[e.type];
+  const cut = t.cuts.length > 1 && e.cut !== 'regular' ? `${cutLabel(t, e.cut)} ` : '';
+  const name = cut ? t.label.split(' / ')[0].toLowerCase() : t.label.split(' / ')[0];
+  return `${cut}${name}${e.length && t.lengths ? ` · ${lengthLabel(t, e.length).toLowerCase()}` : ''}`;
+}
+
+function diffText(d, t) {
+  if (d.field === 'cut') return `Different cut: ${cutLabel(t, d.have).toLowerCase()}, not ${d.want}`;
+  return `Different length: ${lengthLabel(t, d.have).toLowerCase()}, not ${t.lengths?.includes(d.want) ? lengthLabel(t, d.want).toLowerCase() : d.want}`;
+}
+
+function filterRow(label, act, options, value) {
+  return html`<div class="filter-row"><span class="filter-label">${label}</span><div class="chips scroll-x">${options.map((o) => html`
+    <button type="button" class="chip filter-chip ${o.id === value ? 'on' : ''}" aria-pressed="${String(o.id === value)}" data-act="${act}" data-v="${o.id}">${o.img ? html`<span class="chip-img">${o.img}</span>` : ''}${o.label}</button>`)}</div></div>`;
+}
+
+function viewCatalog() {
+  const C = S.cat;
+  const replacing = C.replaceId ? getItem(C.replaceId) : null;
+  return html`<section class="pad catalog">
     <header class="subhead"><button type="button" class="icon-btn" data-act="closeView" aria-label="Back">${icon('back')}</button>
-      <div><p class="eyebrow">Add something you own</p><h1>Browse the archive</h1></div></header>
-    ${seg('archProvider', [{ id: 'commons', label: 'Online: Wikimedia Commons' }, { id: 'library', label: 'Built-in illustrations' }], A.provider)}
-    <p class="muted small">${prov.live
-      ? 'Openly licensed photos from Wikimedia Commons, searched live. Results vary — pick the closest stand-in for your item. Credits are kept with each image.'
-      : 'Offline illustrations bundled with this app (every type, cut and colour). This is not an online archive.'}</p>
-    <form class="card filters" data-submit="archSearch">
-      <div class="row gap wrap">
-        <label>Category<select data-change="archSlot"><option value="">All</option>${SLOTS.map((s) => html`<option value="${s.id}" ${A.slot === s.id ? 'selected' : ''}>${s.label}</option>`)}</select></label>
-        <label>Type<select data-change="archType"><option value="">Any</option>${typeOpts.map((x) => html`<option value="${x.id}" ${A.type === x.id ? 'selected' : ''}>${x.label}</option>`)}</select></label>
-        ${t && t.cuts.length > 1 ? html`<label>Cut<select data-change="archCut"><option value="">Any</option>${t.cuts.map((c) => html`<option value="${c}" ${A.cut === c ? 'selected' : ''}>${cap(c)}</option>`)}</select></label>` : ''}
-      </div>
-      <h4>Colour ${A.color ? html`<button type="button" class="link small" data-act="archColor" data-v="${A.color}">clear</button>` : ''}</h4>
-      ${swatches('archColor', A.color)}
-      <div class="row gap"><label class="sr-only" for="arch-q">Search</label><input id="arch-q" class="grow" type="search" placeholder="${prov.live ? 'Or search, e.g. “corduroy jacket”' : 'Filter by name…'}" value="${A.query}" data-input="archQuery"><button class="btn primary" type="submit">Search</button></div>
-    </form>
-    ${A.status === 'loading' && !A.results.length ? html`<div class="arch-grid" role="status" aria-label="Loading">${Array.from({ length: 6 }, () => html`<div class="arch-card skeleton-card"></div>`)}</div>` : ''}
-    ${A.status === 'error' ? html`<div class="card error-card" role="alert"><p>${A.error}</p><div class="row gap"><button type="button" class="btn sm" data-act="archSearchBtn">Try again</button><button type="button" class="btn sm" data-act="archProvider" data-v="library">Use built-in illustrations</button></div></div>` : ''}
-    ${A.status === 'done' && !A.results.length ? html`<p class="muted empty-inline">No matches. Try fewer filters or a simpler search.</p>` : ''}
-    ${A.status === 'idle' ? html`<p class="muted empty-inline">Choose filters and tap Search.</p>` : ''}
-    ${A.results.length ? html`<div class="arch-grid">${A.results.map((r, i) => html`<button type="button" class="arch-card" data-act="archPick" data-i="${i}">
-      ${r.illustration ? illustration(r.typeId, r.colorId, r.cut) : html`<img src="${r.thumb}" alt="${r.title}" loading="lazy" referrerpolicy="no-referrer">`}
-      <span class="tiny">${r.illustration ? cap(r.title) : r.license}</span></button>`)}</div>
-      ${A.nextOffset != null ? html`<button type="button" class="btn ghost block" data-act="archMore" ${A.status === 'loading' ? 'disabled' : ''}>${A.status === 'loading' ? 'Loading…' : 'Load more'}</button>` : ''}` : ''}
+      <div><p class="eyebrow">${replacing ? `New image for your ${replacing.name}` : 'Add something you own'}</p><h1>${replacing ? 'Find a closer match' : 'Find your item'}</h1></div></header>
+    ${seg('catSource', [{ id: 'curated', label: 'Curated catalog' }, { id: 'online', label: 'Online archive' }], C.source)}
+    ${C.source === 'curated' ? curatedPanel() : onlinePanel()}
+    <div class="more-ways"><strong class="small">Other ways to add it</strong>
+      <div class="row gap wrap"><button type="button" class="btn sm" data-act="openUpload">${icon('camera')} Upload a photo</button>
+      ${replacing ? '' : html`<button type="button" class="btn sm" data-act="openLink">${icon('pin')} Product link</button>`}</div></div>
   </section>`;
 }
 
-SHEETS.archConfirm = (s) => {
-  const r = s.result;
-  const t = s.itemType ? TYPE[s.itemType] : null;
-  return html`${sheetHead('Confirm your item', 'This adds a garment you own. The image is just a stand-in — swap in your own photo any time.')}
-  <div class="sheet-body">
-    <div class="upload-preview">${r.illustration ? illustration(s.itemType || r.typeId || 'tshirt', s.color || r.colorId || 'grey', s.cut, s.pattern) : html`<img src="${r.thumb}" alt="${r.title}" referrerpolicy="no-referrer">`}</div>
-    ${!r.illustration ? html`<p class="muted tiny">“${r.title}” · ${r.author} · ${r.license} · <a href="${r.pageUrl}" target="_blank" rel="noopener noreferrer">source</a></p>` : ''}
-    <label class="block-label">Type${typeSelect('acType', s.itemType, { required: true })}</label>
-    ${t && t.cuts.length > 1 ? html`<h4>Cut / fit</h4>${seg('acCut', t.cuts.map((c) => ({ id: c, label: cap(c) })), s.cut)}` : ''}
-    <h4>Colour of <em>your</em> item</h4>${swatches('acColor', s.color)}
-    <h4>Pattern</h4>${seg('acPattern', PATTERNS, s.pattern)}
-    <p class="owned-note">${icon('check')} Adds to <strong>My wardrobe</strong> as something I own — not a wishlist item.</p>
-  </div>
-  <footer class="sheet-foot"><button type="button" class="btn primary block" data-act="archAdd" ${s.itemType && s.color ? '' : 'disabled'}>${s.itemType && s.color ? 'Add to my wardrobe' : 'Choose type and colour'}</button></footer>`;
-};
+function curatedPanel() {
+  const C = S.cat;
+  const res = curatedSearch(catFilters(), coll());
+  const ap = res.applied;
+  const t = ap.type ? TYPE[ap.type] : null;
+  const typeOpts = ap.slot ? orderTypes(typesForSlot(ap.slot), coll()) : [];
+  const crumbs = [
+    ap.slot && ['slot', SLOT_LABEL[ap.slot]], t && ['type', t.label], ap.cut && ['cut', t ? cutLabel(t, ap.cut) : cap(ap.cut)],
+    ap.length && ['length', t?.lengths ? lengthLabel(t, ap.length) : cap(ap.length)], ap.color && ['color', colorLabel(ap.color)], ap.pattern && ['pattern', PATTERNS.find((p) => p.id === ap.pattern).label],
+  ].filter(Boolean);
+  const shown = res.close.slice(0, C.limit);
+  return html`
+    <form class="row gap cat-search" data-submit="catSearch"><label class="sr-only" for="cat-q">Search</label>
+      <input id="cat-q" class="grow" type="search" placeholder="e.g. light blue wide-leg jeans" value="${C.query}" data-input="catQuery" autocomplete="off"><button class="btn primary" type="submit">Search</button></form>
+    <div class="card filters">
+      ${filterRow('Category', 'catSlot', SLOTS.map((s) => ({ id: s.id, label: s.label, img: illustration({ type: CATEGORY_ICON[s.id], color: 'grey' }) })), ap.slot)}
+      ${ap.slot ? filterRow('Type', 'catType', typeOpts.map((x) => ({ id: x.id, label: x.label.split(' / ')[0], img: illustration({ type: x.id, color: 'grey' }) })), ap.type) : ''}
+      ${t && t.cuts.length > 1 ? filterRow('Cut / fit', 'catCut', orderedCuts(t, coll()).map((c) => ({ id: c, label: cutLabel(t, c), img: illustration({ type: t.id, cut: c, color: 'grey' }) })), ap.cut) : ''}
+      ${t?.lengths ? filterRow('Length', 'catLength', t.lengths.map((l) => ({ id: l, label: lengthLabel(t, l), img: illustration({ type: t.id, cut: ap.cut, length: l, color: 'grey' }) })), ap.length) : ''}
+      <details class="filter-more" ${ap.color || ap.pattern ? 'open' : ''}><summary class="small">Colour &amp; pattern${ap.color || ap.pattern ? `: ${[ap.color && colorLabel(ap.color), ap.pattern && PATTERNS.find((p) => p.id === ap.pattern).label].filter(Boolean).join(', ')}` : ''}</summary>
+        ${colorPicker('catColor', ap.color)}
+        ${filterRow('Pattern', 'catPattern', PATTERNS, ap.pattern)}</details>
+      <div class="coll-bar"><span class="muted small">Show first</span>${seg('setCollection', COLLECTIONS.map((c) => ({ id: c.id, label: c.id === 'all' ? 'All' : c.label })), coll())}</div>
+    </div>
+    ${crumbs.length ? html`<p class="crumbs small">${crumbs.map(([k, label], i) => html`${i ? html`<span class="muted" aria-hidden="true"> → </span>` : ''}<button type="button" class="crumb" data-act="catClear" data-v="${k}" aria-label="Remove ${label}">${label} ×</button>`)} <button type="button" class="link small" data-act="catClearAll">Clear all</button></p>` : ''}
+    ${res.ignored.length ? html`<p class="muted small">Not used in the search: “${res.ignored.join(' ')}”. Materials and brands aren't in the curated catalog — try the <button type="button" class="link" data-act="catSource" data-v="online">online archive</button>.</p>` : ''}
+    <p class="muted small approx">${APPROX_NOTE}</p>
+    ${res.close.length ? html`<h3>${crumbs.length ? 'Closest matches' : 'Everyday examples'} <span class="muted small">(${res.close.length})</span></h3>
+      <div class="arch-grid">${shown.map((r) => resultCard(r))}</div>
+      ${res.close.length > shown.length ? html`<button type="button" class="btn ghost block" data-act="catMore">Show ${res.close.length - shown.length} more</button>` : ''}`
+    : noMatchCard(res)}
+    ${res.similar.length ? html`<h3>${res.close.length ? 'Similar, but a different shape' : 'Approximate stand-ins'} <span class="muted small">(${res.similar.length})</span></h3>
+      <p class="muted tiny">These differ from what you asked for. If you pick one, set the cut and length to match your garment.</p>
+      <div class="arch-grid">${res.similar.map((r) => resultCard(r))}</div>` : ''}`;
+}
 
-async function runArchive(more = false) {
-  const A = S.archive;
-  const prov = PROVIDERS.find((p) => p.id === A.provider);
-  if (!more) { A.results = []; A.nextOffset = null; }
-  A.status = 'loading'; A.error = null;
+function resultCard(r) {
+  const e = r.example;
+  const t = TYPE[e.type];
+  const v = { type: e.type, cut: e.cut, length: e.length, color: r.color, pattern: r.pattern };
+  return html`<div class="result">
+    <button type="button" class="arch-card" data-act="catPick" data-id="${e.id}" data-color="${r.color}" data-pattern="${r.pattern}">
+      <span class="tile-img">${gimg(v)}</span>
+      <span class="card-title">${cap(exampleTitle(e))}</span>
+      <span class="tiny muted">${e.note}</span>
+      ${r.diffs.map((d) => html`<span class="tiny warn-text">${diffText(d, t)}</span>`)}
+      <span class="src-badge">${CATALOG_SOURCE[imageSource(v, coll())]}</span>
+    </button>
+    <button type="button" class="link tiny report" data-act="catReport" data-id="${e.id}">Not relevant</button>
+  </div>`;
+}
+
+function noMatchCard(res) {
+  return html`<div class="card no-match" role="status">
+    <h3>We couldn't find a close match.</h3>
+    <p class="small">Upload your own photo or continue with an approximate example.</p>
+    <div class="row gap wrap">
+      <button type="button" class="btn sm primary" data-act="openUpload">${icon('camera')} Upload a photo</button>
+      <button type="button" class="btn sm" data-act="catBroaden">Broaden the filters</button>
+      <button type="button" class="btn sm" data-act="catApprox">Use an approximate example</button>
+    </div>
+    <p class="muted tiny">An approximate example is a stand-in: you'll set the type, cut, length and colour to match your garment before saving.</p>
+  </div>`;
+}
+
+function onlinePanel() {
+  const C = S.cat;
+  const O = C.online;
+  const hiddenTotal = O.hidden ? O.hidden.metadata + O.hidden.pixels + O.hidden.reported : 0;
+  return html`
+    <div class="card limitation">
+      <p class="small"><strong>Community photos from Wikimedia Commons — not a product catalog.</strong> Results are checked before they're shown (one garment, plain background, garment named in the description), but they can still be imperfect. Use one only as a stand-in and check the details.</p>
+    </div>
+    <form class="row gap cat-search" data-submit="onlineSearch"><label class="sr-only" for="online-q">Search the online archive</label>
+      <input id="online-q" class="grow" type="search" placeholder="e.g. corduroy jacket" value="${C.query}" data-input="catQuery" autocomplete="off"><button class="btn primary" type="submit">Search</button></form>
+    ${O.status === 'idle' ? html`<p class="muted empty-inline">Search for a garment to see checked community photos.</p>` : ''}
+    ${O.status === 'loading' && !O.results.length ? html`<div class="arch-grid" role="status" aria-label="Loading">${Array.from({ length: 6 }, () => html`<div class="arch-card skeleton-card"></div>`)}</div><p class="muted small center-text">Checking images…</p>` : ''}
+    ${O.status === 'error' ? html`<div class="card error-card" role="alert"><p>${O.error}</p><div class="row gap"><button type="button" class="btn sm" data-act="onlineRetry">Try again</button><button type="button" class="btn sm" data-act="catSource" data-v="curated">Use the curated catalog</button></div></div>` : ''}
+    ${O.status === 'done' && !O.results.length ? noMatchCard({}) : ''}
+    ${O.results.length ? html`<div class="arch-grid">${O.results.map((r, i) => html`<div class="result">
+        <button type="button" class="arch-card" data-act="onlinePick" data-i="${i}">${framed(html`<img src="${r.thumb}" alt="${r.title}" loading="lazy" referrerpolicy="no-referrer">`)}
+        <span class="tiny">${r.license}</span></button>
+        <button type="button" class="link tiny report" data-act="onlineReport" data-i="${i}">Report</button></div>`)}</div>
+      ${O.nextOffset != null ? html`<button type="button" class="btn ghost block" data-act="onlineMore" ${O.status === 'loading' ? 'disabled' : ''}>${O.status === 'loading' ? 'Checking…' : 'Load more'}</button>` : ''}` : ''}
+    ${hiddenTotal ? html`<p class="muted tiny center-text">${hiddenTotal} result${hiddenTotal > 1 ? 's' : ''} hidden: ${[O.hidden.metadata && `${O.hidden.metadata} looked like people, scenes or artwork, or didn't name the garment`, O.hidden.pixels && `${O.hidden.pixels} failed the plain-background check`, O.hidden.reported && `${O.hidden.reported} you reported`].filter(Boolean).join('; ')}.</p>` : ''}`;
+}
+
+async function runOnline(more = false) {
+  const C = S.cat;
+  const O = C.online;
+  if (!more) { O.results = []; O.nextOffset = null; O.hidden = null; }
+  O.status = 'loading'; O.error = null;
   render();
-  const reqId = (runArchive.seq = (runArchive.seq || 0) + 1);
+  const reqId = (runOnline.seq = (runOnline.seq || 0) + 1);
   try {
-    const res = await prov.search({ query: A.query.trim(), slot: A.slot, type: A.type, cut: A.cut, color: A.color, offset: more ? A.nextOffset : 0 });
-    if (reqId !== runArchive.seq) return;
-    A.results = more ? [...A.results, ...res.results] : res.results;
-    A.nextOffset = res.nextOffset;
-    A.status = 'done';
+    const res = await commonsProvider.search({ query: C.query.trim(), type: C.type, cut: C.cut, color: C.color, offset: more ? O.nextOffset : 0, reported: db.reports.map((r) => r.id) });
+    if (reqId !== runOnline.seq) return;
+    O.results = more ? [...O.results, ...res.results] : res.results;
+    O.hidden = more && O.hidden ? Object.fromEntries(Object.keys(res.hidden).map((k) => [k, O.hidden[k] + res.hidden[k]])) : res.hidden;
+    O.nextOffset = res.nextOffset;
+    O.status = 'done';
   } catch (e) {
-    if (reqId !== runArchive.seq) return;
-    A.status = 'error'; A.error = e.message;
+    if (reqId !== runOnline.seq) return;
+    O.status = 'error'; O.error = e.message;
   }
   render();
 }
+
+// ---------------------------------------------------------------- confirm before saving
+// One lightweight step for every way of adding: catalogue example, online
+// photo, own photo or product link. Only the type's typical values are
+// prefilled; nothing is inferred from how the picture looks except a
+// suggested colour, which is labelled.
+const CONFIRM_TITLE = { catalog: 'Add to your wardrobe', archive: 'Check this online photo', upload: 'Check your photo', link: 'Check the product photo' };
+
+SHEETS.confirm = (s) => {
+  const t = s.v.type ? TYPE[s.v.type] : null;
+  const replacing = s.replaceId ? getItem(s.replaceId) : null;
+  const multi = s.source === 'catalog' && !replacing;
+  const v = { ...s.v, color: s.colors[0] || t?.starter[0] || 'grey' };
+  const typical = t ? defaultItemFields(t.id, v.cut, v.length) : null;
+  const est = (k) => (s.set[k] ? '' : html`<span class="est">typical for this type — not checked</span>`);
+  const ready = t && s.colors.length;
+  const n = multi ? s.colors.length : 1;
+  const preview = s.source === 'catalog'
+    ? html`<div class="confirm-preview">${t ? (s.colors.length > 1 ? s.colors.slice(0, 4).map((c) => gimg({ ...v, color: c })) : gimg(v)) : html`<span class="muted small">Choose a type below</span>`}</div>
+      ${t ? html`<p class="muted tiny">${CATALOG_SOURCE[imageSource(v, coll())]} · ${APPROX_NOTE}</p>` : ''}`
+    : html`<div class="confirm-photo">${framed(html`<img src="${s.source === 'archive' ? s.result.thumb : s.preview}" alt="Preview" referrerpolicy="no-referrer">`, s.frame, 'editable')}</div>
+      ${frameControls(s.frame, 'cf')}
+      ${s.source === 'archive' ? html`<p class="muted tiny">“${s.result.title}” · ${s.result.author} · ${s.result.license} · <a href="${s.result.pageUrl}" target="_blank" rel="noopener noreferrer">source</a></p>` : ''}`;
+  return html`${sheetHead(replacing ? 'Confirm the new image' : CONFIRM_TITLE[s.source], replacing ? 'Check the details still describe your garment. Its outfits, history and feedback are kept.' : s.source === 'catalog' ? '' : 'The details below describe your garment, not the picture.')}
+  <div class="sheet-body confirm">
+    ${preview}
+    ${s.diffs?.length || s.approx ? html`<p class="approx-warn small">${icon('warn')} Approximate stand-in${s.diffs?.length && t ? ` — ${s.diffs.map((d) => diffText(d, t).toLowerCase()).join('; ')}` : ''}. Set the details below to match your garment.</p>` : ''}
+    <label class="block-label">Type${typeSelect('cfType', s.v.type, { required: true })}</label>
+    ${t ? html`
+      ${cutTiles('cfCut', v)}
+      ${lengthTiles('cfLength', v)}
+      <h4>${multi ? html`Colours you own <span class="muted small">— each becomes its own item</span>` : 'Colour'} ${s.colorSuggested ? html`<span class="est">suggested from your photo — check it</span>` : ''}</h4>
+      ${colorPicker('cfColor', multi ? s.colors : s.colors[0] || '', { multi })}
+      <h4>Pattern</h4>${seg('cfPattern', PATTERNS, s.v.pattern)}
+      ${t.slot !== 'shoes' ? html`<h4>Thickness</h4>${seg('cfThickness', THICKNESS, s.thickness)}
+        <p class="muted tiny">${s.thickness === 'unsure' ? `Not sure is fine — I'll assume ${WARMTH_LABELS[typical.warmth].toLowerCase()} warmth, typical for this type.` : `Saved as ${WARMTH_LABELS[warmthFor(t, v.cut, s.thickness)].toLowerCase()} warmth.`}</p>` : ''}
+      ${['outer', 'shoes'].includes(t.slot) ? html`<h4>Water-resistant? ${est('water')}</h4>${triSelect('cfWater', s.water)}` : ''}
+      ${t.slot === 'shoes' ? html`<h4>Comfortable for long walks? ${est('walk')}</h4>${triSelect('cfWalk', s.walk)}<h4>OK for cycling? ${est('cycle')}</h4>${triSelect('cfCycle', s.cycle)}` : ''}
+      <p class="muted tiny">Warmth, water resistance and comfort can't be judged from a picture. Leave anything you're unsure about — you can edit every detail later.</p>` : ''}
+    ${s.error ? html`<p class="error small" role="alert">${s.error}</p>` : ''}
+  </div>
+  <footer class="sheet-foot"><button type="button" class="btn primary block" data-act="confirmAdd" ${ready && !s.busy ? '' : 'disabled'}>${!t ? 'Choose a type' : !s.colors.length ? 'Choose a colour' : replacing ? 'Use this image' : n > 1 ? `Add ${n} items` : 'Add to my wardrobe'}</button></footer>`;
+};
 
 // ---------------------------------------------------------------- outfits tab
 function viewOutfits() {
@@ -862,12 +1086,14 @@ function viewProfile() {
   return html`<section class="pad profile">
     <h1>You</h1>
     <div class="card"><h3>Location</h3>${locationPicker()}</div>
+    <div class="card"><h3>Catalog</h3><p class="muted small">Which collection to show first when adding clothes. Everything stays available.</p>
+      ${seg('setCollection', COLLECTIONS, coll())}</div>
     <div class="card"><h3>Temperature</h3>
       ${seg('setThermal', [{ id: 'cold', label: 'I feel cold easily' }, { id: 'neutral', label: 'Average' }, { id: 'warm', label: 'I run warm' }], p.thermal)}
       <p class="small">${lt === 0 ? html`<span class="muted">No adjustment learned yet. “Too cold / too warm” feedback tunes this.</span>` : html`Learned from feedback: suggestions are <strong>${lt > 0 ? 'warmer' : 'lighter'}</strong> than average (${lt > 0 ? '+' : ''}${lt.toFixed(1)}). <button type="button" class="link" data-act="resetThermal">Reset</button>`}</p>
     </div>
     <div class="card"><h3>Style</h3><p class="muted small">Gentle nudges, not rules.</p>${chips('toggleStyle', STYLE_OPTS, p.style)}
-      <h4>Colours you like wearing</h4>${swatches('toggleFavColor', p.favoriteColors, { multi: true })}
+      <h4>Colours you like wearing</h4>${colorPicker('toggleFavColor', p.favoriteColors, { multi: true })}
       <h4>Never suggest</h4>${chips('toggleAvoid', TYPES.map((t) => ({ id: t.id, label: t.label })), p.avoidTypes)}
     </div>
     <div class="card"><h3>What I've learned</h3>
@@ -876,7 +1102,7 @@ function viewProfile() {
       ${offs.length || pairs ? html`<button type="button" class="btn sm ghost" data-act="resetLearning">Reset learned preferences</button>` : ''}
     </div>
     <div class="card"><h3>Your data</h3>
-      <p class="small">Everything is stored <strong>only in this browser on this device</strong> (wardrobe and feedback in local storage, photos in IndexedDB). There's no account and no sync, so clearing site data or switching devices loses it — export a backup if needed. Weather requests send only the city coordinates to Open-Meteo; archive searches send your search terms to Wikimedia.</p>
+      <p class="small">Everything is stored <strong>only in this browser on this device</strong> (wardrobe and feedback in local storage, photos in IndexedDB). There's no account and no sync, so clearing site data or switching devices loses it — export a backup if needed. Weather requests send only the city coordinates to Open-Meteo; online photo searches send your search terms to Wikimedia.</p>
       <div class="row gap wrap"><button type="button" class="btn sm" data-act="exportData">Export backup (JSON)</button>
       <button type="button" class="btn sm danger ghost" data-act="resetAll">${S.confirmReset ? 'Tap again to erase everything' : 'Delete all my data'}</button></div>
     </div>
@@ -888,41 +1114,184 @@ const A = {
   tab(el) { S.tab = el.dataset.v; S.view = null; S.confirmReset = false; if (S.tab === 'today' && S.today.stage === 'results' && S.today.weather.status === 'ok') computeResults(); render(); window.scrollTo(0, 0); },
   closeSheet() {
     if (S.sheet?.type === 'edit') for (const id of S.sheet.newPhotos || []) deletePhoto(id);
-    if (S.sheet?.type === 'upload' && S.sheet.preview) URL.revokeObjectURL(S.sheet.preview);
+    if (S.sheet?.type === 'confirm' && S.sheet.preview) URL.revokeObjectURL(S.sheet.preview);
     S.sheet = null; render();
   },
-  closeView() { S.view = null; if (S.today.weather.status === 'ok') computeResults(); render(); window.scrollTo(0, 0); },
+  closeView() { S.view = null; S.cat.replaceId = null; if (S.today.weather.status === 'ok') computeResults(); render(); window.scrollTo(0, 0); },
 
   // onboarding
-  startOnboard() { S.onboardStep = 'starter'; S.starter = { idx: 0, mode: 'onboard' }; render(); },
-  onboardBack() { S.onboardStep = 'starter'; S.starter.idx = STARTER_SLOTS.length - 1; render(); },
-  finishOnboard() { db.prefs.onboarded = true; save(); S.tab = 'today'; render(); window.scrollTo(0, 0); },
-  starterNext() {
-    if (S.starter.idx < STARTER_SLOTS.length - 1) S.starter.idx++;
-    else S.onboardStep = 'prefs';
-    render(); window.scrollTo(0, 0);
+  startOnboard() { S.onboardStep = 'collection'; render(); window.scrollTo(0, 0); },
+  onboardBack() { S.onboardStep = { collection: 'welcome', starter: 'collection', next: 'starter' }[S.onboardStep] || 'welcome'; render(); window.scrollTo(0, 0); },
+  pickCollection(el) { db.prefs.collection = el.dataset.v || null; save(); S.onboardStep = 'starter'; render(); window.scrollTo(0, 0); },
+  setCollection(el) {
+    db.prefs.collection = el.dataset.v; save(); render();
   },
-  starterPrev() { if (S.starter.idx > 0) S.starter.idx--; else S.onboardStep = 'welcome'; render(); window.scrollTo(0, 0); },
-  starterGo(el) { S.starter.idx = +el.dataset.i; render(); },
-  openStarter() { S.sheet = null; S.view = 'starter'; S.starter = { idx: 0, mode: 'add' }; render(); window.scrollTo(0, 0); },
+  starterDone() { S.onboardStep = 'next'; render(); window.scrollTo(0, 0); },
+  finishOnboard() { db.prefs.onboarded = true; save(); S.view = null; S.tab = 'today'; render(); window.scrollTo(0, 0); },
+  finishLater() { db.prefs.onboarded = true; save(); S.view = null; S.tab = 'wardrobe'; render(); window.scrollTo(0, 0); },
+  openStarter() { A.openStarterSlot({ dataset: {} }); },
   openStarterSlot(el) {
-    const i = STARTER_SLOTS.indexOf(el.dataset.v);
-    S.sheet = null; S.view = 'starter'; S.starter = { idx: Math.max(0, i), mode: 'add' }; render(); window.scrollTo(0, 0);
+    S.sheet = null;
+    if (db.prefs.onboarded) S.view = 'starter';
+    else { S.view = null; S.onboardStep = 'starter'; }
+    if (el.dataset.v) S.scrollTo = `cat-${el.dataset.v}`; else window.scrollTo(0, 0);
+    render();
   },
+  scrollSlot(el) { document.getElementById(`cat-${el.dataset.v}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' }); },
   openQuick(el) {
     const t = TYPE[el.dataset.type];
     if (!t) return;
-    S.sheet = { type: 'quick', typeId: t.id, cut: t.defaultCut || t.cuts[0], colors: [], pattern: 'solid' }; render();
+    const e = EXAMPLES.find((x) => x.type === t.id && x.cut === defaultCut(t, coll()) && (!t.lengths || x.length === defaultLength(t))) || EXAMPLES.find((x) => x.type === t.id);
+    openConfirm({ source: 'catalog', v: { type: t.id, cut: e?.cut, length: e?.length } });
   },
-  quickCut(el) { S.sheet.cut = el.dataset.v; render(); },
-  quickPattern(el) { S.sheet.pattern = el.dataset.v; render(); },
-  quickColor(el) { const c = S.sheet.colors; const v = el.dataset.v; S.sheet.colors = c.includes(v) ? c.filter((x) => x !== v) : [...c, v]; render(); },
-  quickAdd() {
+  toggleMoreColors() { S.moreColors = !S.moreColors; render(); },
+
+  // catalogue
+  openCatalog(el) {
+    S.sheet = null; S.view = 'catalog';
+    S.cat = freshCatalog({ slot: el?.dataset?.v || '' });
+    render(); window.scrollTo(0, 0);
+  },
+  catSource(el) {
+    const C = S.cat;
+    C.source = el.dataset.v;
+    if (C.source === 'online' && C.online.status === 'idle' && (C.query.trim() || C.type)) runOnline(); else render();
+  },
+  catSlot(el) {
+    const C = S.cat, v = el.dataset.v;
+    if (C.slot === v) Object.assign(C, { slot: '', type: '', types: [], cut: '', length: '' });
+    else { C.slot = v; C.types = []; if (C.type && TYPE[C.type].slot !== v) Object.assign(C, { type: '', cut: '', length: '' }); }
+    C.limit = 30; render();
+  },
+  catType(el) {
+    const C = S.cat, v = el.dataset.v;
+    if (C.type === v) Object.assign(C, { type: '', cut: '', length: '' });
+    else {
+      const t = TYPE[v];
+      Object.assign(C, { type: v, types: [], slot: t.slot });
+      if (C.cut && !t.cuts.includes(C.cut)) C.cut = '';
+      if (C.length && !t.lengths?.includes(C.length)) C.length = '';
+    }
+    C.limit = 30; render();
+  },
+  catCut(el) { toggleFilter('cut', el.dataset.v); },
+  catLength(el) { toggleFilter('length', el.dataset.v); },
+  catColor(el) { toggleFilter('color', el.dataset.v); },
+  catPattern(el) { toggleFilter('pattern', el.dataset.v); },
+  catClear(el) {
+    const C = S.cat, k = el.dataset.v;
+    if (k === 'slot') Object.assign(C, { slot: '', type: '', types: [], cut: '', length: '' });
+    else if (k === 'type') Object.assign(C, { type: '', types: [], cut: '', length: '' });
+    else C[k] = '';
+    render();
+  },
+  catClearAll() { S.cat = freshCatalog({ source: S.cat.source, replaceId: S.cat.replaceId }); render(); },
+  catMore() { S.cat.limit += 30; render(); },
+  // Remove the most specific filter first.
+  catBroaden() {
+    const C = S.cat;
+    const k = ['pattern', 'color', 'length', 'cut'].find((f) => C[f]);
+    if (k) C[k] = '';
+    else if (C.ignored?.length) { C.ignored = []; C.query = ''; }
+    else if (C.type || C.types?.length) Object.assign(C, { type: '', types: [] });
+    else C.slot = '';
+    if (C.source === 'online') { C.source = 'curated'; }
+    render();
+  },
+  catApprox() {
+    const res = curatedSearch(catFilters(), coll());
+    const r = res.similar[0];
+    if (r) { pickExample(r.example, r, true); return; }
+    const t = TYPE[res.applied.type || res.applied.types?.[0]];
+    const e = t && EXAMPLES.find((x) => x.type === t.id);
+    if (e) pickExample(e, null, true);
+    else openConfirm({ source: 'catalog', approx: true, v: { type: res.applied.slot ? orderTypes(typesForSlot(res.applied.slot), coll())[0].id : '' } });
+  },
+  catPick(el) {
+    const res = curatedSearch(catFilters(), coll());
+    const r = [...res.close, ...res.similar].find((x) => x.example.id === el.dataset.id);
+    pickExample(EXAMPLE[el.dataset.id], r, false, el.dataset.pattern);
+  },
+  catReport(el) {
+    db.reports.push({ kind: 'curated', id: el.dataset.id, key: reportKey(), at: Date.now() });
+    save();
+    toast("Thanks — hidden for this search on this device. Reports aren't sent anywhere: the app has no server.", 4500);
+    render();
+  },
+  onlineRetry() { runOnline(); },
+  onlineMore() { runOnline(true); },
+  onlinePick(el) {
+    const C = S.cat;
+    const r = C.online.results[+el.dataset.i];
+    const it = C.replaceId ? getItem(C.replaceId) : null;
+    const p = parseQuery(C.query);
+    const type = C.type || p.types?.[0] || it?.type || '';
+    openConfirm({ source: 'archive', result: r, v: { type, cut: C.cut || p.cut || (it?.type === type ? it.cut : ''), length: C.length || p.length || (it?.type === type ? it.length : '') }, colors: [C.color || p.color || it?.color].filter(Boolean) });
+  },
+  onlineReport(el) {
+    const O = S.cat.online;
+    const r = O.results[+el.dataset.i];
+    db.reports.push({ kind: 'online', id: r.id, at: Date.now() });
+    save();
+    O.results.splice(+el.dataset.i, 1);
+    if (O.hidden) O.hidden.reported++;
+    toast("Reported — hidden on this device. Reports aren't sent anywhere: the app has no server.", 4500);
+    render();
+  },
+
+  // confirm step
+  cfType(el) {
+    const s = S.sheet, t = TYPE[el.value];
+    s.v.type = t ? t.id : '';
+    if (t) {
+      if (!t.cuts.includes(s.v.cut)) s.v.cut = defaultCut(t, coll());
+      if (!t.lengths?.includes(s.v.length)) s.v.length = defaultLength(t);
+      s.diffs = [];
+    }
+    applyTypical(s); render();
+  },
+  cfCut(el) { const s = S.sheet; s.v.cut = el.dataset.v; s.diffs = (s.diffs || []).filter((d) => d.field !== 'cut'); render(); },
+  cfLength(el) { const s = S.sheet; s.v.length = el.dataset.v; s.diffs = (s.diffs || []).filter((d) => d.field !== 'length'); render(); },
+  cfColor(el) {
+    const s = S.sheet, v = el.dataset.v;
+    const multi = s.source === 'catalog' && !s.replaceId;
+    s.colors = multi ? (s.colors.includes(v) ? s.colors.filter((x) => x !== v) : [...s.colors, v]) : [v];
+    s.colorSuggested = false; render();
+  },
+  cfPattern(el) { S.sheet.v.pattern = el.dataset.v; render(); },
+  cfThickness(el) { S.sheet.thickness = el.dataset.v; render(); },
+  cfWater(el) { setConfirmField('water', el.dataset.v); },
+  cfWalk(el) { setConfirmField('walk', el.dataset.v); },
+  cfCycle(el) { setConfirmField('cycle', el.dataset.v); },
+  cfReset() { S.sheet.frame = { zoom: 1, x: 50, y: 50 }; render(); },
+  async confirmAdd() {
     const s = S.sheet;
-    s.colors.forEach((c) => createItem({ type: s.typeId, color: c, cut: s.cut, pattern: s.pattern }));
-    toast(`Added ${s.colors.length} ${TYPE[s.typeId].label.toLowerCase()}${s.colors.length > 1 ? 's' : ''} to your wardrobe`);
-    S.sheet = null;
-    if (S.today.weather.status === 'ok') computeResults();
+    const t = TYPE[s.v.type];
+    s.busy = true; s.error = null; render();
+    try {
+      let image;
+      if (s.source === 'catalog') image = { kind: 'catalog' };
+      else if (s.source === 'archive') {
+        const r = s.result;
+        image = { kind: 'archive', thumb: r.thumb, source: 'Wikimedia Commons', license: r.license, author: r.author, pageUrl: r.pageUrl, title: r.title, frame: s.frame };
+      } else image = { kind: 'photo', photoId: await putPhoto(s.blob), frame: s.frame };
+      const attrs = confirmedAttrs(s);
+      if (s.preview) URL.revokeObjectURL(s.preview);
+      if (s.replaceId) {
+        const it = await replaceImage(getItem(s.replaceId), { ...attrs, type: t.id, color: s.colors[0], image, sourceUrl: s.sourceUrl });
+        S.cat.replaceId = null; S.view = null; S.tab = 'wardrobe';
+        openEditSheet(it);
+        toast('Updated — outfits, history and feedback are kept');
+      } else {
+        const extra = s.sourceUrl ? { sourceUrl: s.sourceUrl } : {};
+        const items = s.colors.map((c) => createItem({ type: t.id, color: c, ...attrs, image: { ...image }, ...extra }));
+        S.sheet = null;
+        toast(items.length > 1 ? `Added ${items.length} ${t.label.toLowerCase()} items` : `Added your ${items[0].name}`);
+      }
+      if (S.today.weather.status === 'ok') computeResults();
+    } catch (e) {
+      s.busy = false; s.error = `Couldn't save: ${e.message}`;
+    }
     render();
   },
   async removeItem(el) { await deleteItem(el.dataset.id); render(); },
@@ -1084,22 +1453,27 @@ const A = {
   // wardrobe
   wFilter(el) { S.wardrobeFilter = el.dataset.v; render(); },
   openAddMenu() { S.sheet = { type: 'addMenu' }; render(); },
-  openEdit(el) {
-    const it = getItem(el.dataset.id);
-    S.sheet = { type: 'edit', id: it.id, draft: JSON.parse(JSON.stringify(it)), newPhotos: [] };
-    render();
-  },
+  openEdit(el) { openEditSheet(getItem(el.dataset.id)); render(); },
   editType(el) {
     const d = S.sheet.draft;
     const t = TYPE[el.value];
-    const defs = defaultItemFields(t.id);
+    if (!t.cuts.includes(d.cut)) d.cut = defaultCut(t, coll());
+    d.length = t.lengths ? (t.lengths.includes(d.length) ? d.length : defaultLength(t)) : null;
+    const defs = defaultItemFields(t.id, d.cut, d.length);
     const est = d.estimated || {};
     d.type = t.id; d.slot = t.slot;
-    if (!t.cuts.includes(d.cut)) d.cut = defs.cut;
     for (const k of ['warmth', 'formality', 'water', 'walk', 'cycle']) if (est[k] !== false) d[k] = defs[k];
     render();
   },
-  editCut(el) { S.sheet.draft.cut = el.dataset.v; render(); },
+  editCut(el) {
+    const d = S.sheet.draft;
+    d.cut = el.dataset.v;
+    if (d.estimated?.warmth !== false) d.warmth = cutWarmth(TYPE[d.type], d.cut);
+    render();
+  },
+  editLength(el) { S.sheet.draft.length = el.dataset.v; render(); },
+  editWarmthUnsure() { const d = S.sheet.draft; d.warmth = cutWarmth(TYPE[d.type], d.cut); d.estimated = { ...d.estimated, warmth: true }; render(); },
+  edReset() { S.sheet.draft.image.frame = { zoom: 1, x: 50, y: 50 }; render(); },
   editColor(el) { S.sheet.draft.color = el.dataset.v; render(); },
   editPattern(el) { S.sheet.draft.pattern = el.dataset.v; render(); },
   editStatus(el) { S.sheet.draft.status = el.dataset.v; render(); },
@@ -1119,35 +1493,29 @@ const A = {
       const photoId = await putPhoto(blob);
       s.newPhotos.push(photoId);
       if (s.draft.image?.kind !== 'photo') s.draft.prevImage = s.draft.image;
-      s.draft.image = { kind: 'photo', photoId };
+      s.draft.image = { kind: 'photo', photoId, frame: { zoom: 1, x: 50, y: 50 } };
     } catch (e) {
       s.photoError = e.message;
     }
     s.photoBusy = false;
     render();
   },
-  editRevertImg() {
-    const d = S.sheet.draft;
-    d.image = d.image?.kind === 'photo' && d.prevImage?.kind === 'archive' ? d.prevImage : { kind: 'illustration' };
-    render();
-  },
+  editRevertImg() { S.sheet.draft.image = { kind: 'catalog' }; render(); },
   async editSave() {
-    const s = S.sheet;
-    const it = getItem(s.id);
-    const d = s.draft;
-    const oldPhoto = it.image?.kind === 'photo' ? it.image.photoId : null;
-    const newPhoto = d.image?.kind === 'photo' ? d.image.photoId : null;
-    // Remove photo blobs no longer referenced.
-    for (const id of s.newPhotos) if (id !== newPhoto) await deletePhoto(id);
-    if (oldPhoto && oldPhoto !== newPhoto) await deletePhoto(oldPhoto);
-    if (!d.name.trim()) d.name = itemName(d.type, d.color, d.cut);
-    if (d.image?.kind !== 'photo') delete d.prevImage;
-    Object.assign(it, d, { name: d.name.trim().slice(0, 60) });
-    save();
+    await commitDraft();
     S.sheet = null;
     toast('Saved');
     if (S.today.weather.status === 'ok') computeResults();
     render();
+  },
+  // Save what's in the editor, then pick a new image for the same item.
+  async editFindImage() {
+    const it = await commitDraft();
+    S.sheet = null;
+    S.cat = freshCatalog({ slot: it.slot, type: it.type, replaceId: it.id });
+    S.view = 'catalog';
+    render();
+    window.scrollTo(0, 0);
   },
   async editDelete() {
     const s = S.sheet;
@@ -1160,66 +1528,23 @@ const A = {
     render();
   },
 
-  // upload
-  openUpload() { S.sheet = { type: 'upload', preview: null, blob: null, itemType: '', cut: '', color: 'grey', pattern: 'solid' }; render(); },
+  // upload & product link
+  openUpload() { S.sheet = { type: 'upload', link: false, replaceId: S.view === 'catalog' ? S.cat.replaceId : null }; render(); },
+  openLink() { S.sheet = { type: 'upload', link: true, url: '', replaceId: null }; render(); },
   async uploadFile(el) {
     const s = S.sheet;
+    const url = (s.url || '').trim();
+    if (s.link && url && !/^https?:\/\/[^\s]+\.[^\s]+/.test(url)) { s.error = "That doesn't look like a web link. Check it, or leave it empty."; render(); return; }
     s.error = null; s.busy = true; render();
     try {
       const res = await processUpload(el.files?.[0]);
-      if (s.preview) URL.revokeObjectURL(s.preview);
-      s.preview = res.previewUrl; s.blob = res.blob;
-      s.color = nearestColor(...res.avg).id; s.colorSuggested = true;
-    } catch (e) { s.error = e.message; }
-    s.busy = false;
-    render();
-  },
-  upType(el) { const t = TYPE[el.value]; S.sheet.itemType = t ? t.id : ''; S.sheet.cut = t ? t.defaultCut || t.cuts[0] : ''; render(); },
-  upCut(el) { S.sheet.cut = el.dataset.v; render(); },
-  upColor(el) { S.sheet.color = el.dataset.v; S.sheet.colorSuggested = false; render(); },
-  upPattern(el) { S.sheet.pattern = el.dataset.v; render(); },
-  async uploadAdd() {
-    const s = S.sheet;
-    try {
-      const photoId = await putPhoto(s.blob);
-      const it = createItem({ type: s.itemType, color: s.color, cut: s.cut, pattern: s.pattern, image: { kind: 'photo', photoId } });
-      URL.revokeObjectURL(s.preview);
-      S.sheet = null;
-      S.tab = 'wardrobe'; S.view = null;
-      toast(`Added your ${it.name}. Tap it to refine details.`);
-    } catch (e) {
-      s.error = `Couldn't save the photo: ${e.message}`;
-    }
-    render();
-  },
-
-  // archive
-  openArchive() { S.sheet = null; S.view = 'archive'; render(); window.scrollTo(0, 0); },
-  archProvider(el) { S.archive.provider = el.dataset.v; S.archive.results = []; S.archive.status = 'idle'; S.archive.error = null; runArchive(); },
-  archSlot(el) { const A = S.archive; A.slot = el.value; if (A.type && TYPE[A.type].slot !== A.slot && A.slot) { A.type = ''; A.cut = ''; } render(); },
-  archType(el) { const A = S.archive; A.type = el.value; A.cut = ''; if (A.type) A.slot = TYPE[A.type].slot; render(); },
-  archCut(el) { S.archive.cut = el.value; render(); },
-  archColor(el) { S.archive.color = S.archive.color === el.dataset.v ? '' : el.dataset.v; render(); },
-  archSearchBtn() { runArchive(); },
-  archMore() { runArchive(true); },
-  archPick(el) {
-    const r = S.archive.results[+el.dataset.i];
-    const type = r.typeId || S.archive.type || '';
-    S.sheet = { type: 'archConfirm', result: r, itemType: type, cut: r.cut || (type ? TYPE[type].defaultCut || TYPE[type].cuts[0] : ''), color: r.colorId || S.archive.color || '', pattern: 'solid' };
-    render();
-  },
-  acType(el) { const t = TYPE[el.value]; S.sheet.itemType = t ? t.id : ''; if (t && !t.cuts.includes(S.sheet.cut)) S.sheet.cut = t.defaultCut || t.cuts[0]; render(); },
-  acCut(el) { S.sheet.cut = el.dataset.v; render(); },
-  acColor(el) { S.sheet.color = el.dataset.v; render(); },
-  acPattern(el) { S.sheet.pattern = el.dataset.v; render(); },
-  archAdd() {
-    const s = S.sheet;
-    const r = s.result;
-    const image = r.illustration ? { kind: 'illustration' } : { kind: 'archive', thumb: r.thumb, source: 'Wikimedia Commons', license: r.license, author: r.author, pageUrl: r.pageUrl, title: r.title };
-    const it = createItem({ type: s.itemType, color: s.color, cut: s.cut, pattern: s.pattern, image });
-    S.sheet = null;
-    toast(`Added your ${it.name}`);
-    render();
+      const it = s.replaceId ? getItem(s.replaceId) : null;
+      openConfirm({
+        source: s.link ? 'link' : 'upload', preview: res.previewUrl, blob: res.blob, sourceUrl: s.link && url ? url : null, replaceId: s.replaceId,
+        colors: [nearestColor(...res.avg).id], colorSuggested: true,
+        v: it ? { type: it.type, cut: it.cut, length: it.length, pattern: it.pattern } : {},
+      });
+    } catch (e) { s.error = e.message; s.busy = false; render(); }
   },
 
   // wishlist
@@ -1230,8 +1555,7 @@ const A = {
   wishOwned(el) {
     const w = db.wishlist.find((x) => x.id === el.dataset.id);
     db.wishlist = db.wishlist.filter((x) => x.id !== w.id); save();
-    S.sheet = { type: 'quick', typeId: w.type, cut: TYPE[w.type].defaultCut || TYPE[w.type].cuts[0], colors: [], pattern: 'solid' };
-    render();
+    A.openQuick({ dataset: { type: w.type } });
   },
   wishRemove(el) { db.wishlist = db.wishlist.filter((x) => x.id !== el.dataset.id); save(); render(); },
 
@@ -1268,6 +1592,115 @@ const A = {
     location.reload();
   },
 };
+
+function openEditSheet(it) {
+  S.sheet = { type: 'edit', id: it.id, draft: JSON.parse(JSON.stringify(it)), newPhotos: [], autoName: it.name === itemName(it.type, it.color, it.cut, it.length) };
+}
+
+// The curated search takes structure, not raw text: a submitted query is parsed
+// into filters (shown as removable crumbs), and only words it couldn't place
+// are kept so the user is told about them.
+function catFilters() {
+  const { query, ...rest } = S.cat;
+  const key = reportKey();
+  return { ...rest, hidden: db.reports.filter((r) => r.kind === 'curated' && r.key === key).map((r) => r.id) };
+}
+const reportKey = () => ['slot', 'type', 'cut', 'length'].map((k) => S.cat[k] || '').join('|');
+
+function toggleFilter(k, v) {
+  S.cat[k] = S.cat[k] === v ? '' : v;
+  S.cat.limit = 30;
+  render();
+}
+
+function pickExample(e, r, approx, pattern) {
+  const it = S.cat.replaceId ? getItem(S.cat.replaceId) : null;
+  const color = S.cat.color || it?.color;
+  openConfirm({ source: 'catalog', approx, diffs: r?.diffs || [], v: { type: e.type, cut: e.cut, length: e.length, pattern: pattern || S.cat.pattern || it?.pattern || 'solid' }, colors: color ? [color] : [] });
+}
+
+function openConfirm(over) {
+  S.sheet = {
+    type: 'confirm', source: 'catalog', colors: [], thickness: 'unsure', set: {}, frame: { zoom: 1, x: 50, y: 50 },
+    replaceId: S.view === 'catalog' ? S.cat.replaceId : null, diffs: [],
+    ...over, v: { type: '', cut: '', length: null, pattern: 'solid', ...over.v },
+  };
+  if (S.sheet.replaceId && !over.colors) S.sheet.colors = [getItem(S.sheet.replaceId)?.color].filter(Boolean);
+  applyTypical(S.sheet);
+  render();
+}
+
+// Untouched practical details follow the type's typical values.
+function applyTypical(s) {
+  const t = TYPE[s.v.type];
+  if (!t) return;
+  const d = defaultItemFields(t.id, s.v.cut, s.v.length);
+  s.v.cut = d.cut; s.v.length = d.length;
+  for (const k of ['water', 'walk', 'cycle']) if (!s.set[k]) s[k] = d[k] || 'unknown';
+}
+
+function setConfirmField(k, v) {
+  S.sheet[k] = v;
+  S.sheet.set[k] = true;
+  render();
+}
+
+function confirmedAttrs(s) {
+  const t = TYPE[s.v.type];
+  const d = defaultItemFields(t.id, s.v.cut, s.v.length);
+  return {
+    cut: d.cut, length: d.length, pattern: s.v.pattern, formality: d.formality,
+    warmth: s.thickness === 'unsure' ? d.warmth : warmthFor(t, d.cut, s.thickness),
+    water: ['outer', 'shoes'].includes(t.slot) ? s.water : d.water,
+    walk: t.slot === 'shoes' ? s.walk : d.walk,
+    cycle: t.slot === 'shoes' ? s.cycle : d.cycle,
+    estimated: { warmth: s.thickness === 'unsure', formality: true, water: !s.set.water, walk: !s.set.walk, cycle: !s.set.cycle },
+  };
+}
+
+// Live framing updates without re-rendering, so sliders stay smooth.
+function setFrame(frame, key, value) {
+  frame[key] = +value;
+  const el = $sheet.querySelector('.frame.editable');
+  if (el) el.style.setProperty(key === 'zoom' ? '--z' : `--${key}`, key === 'zoom' ? frame.zoom : `${frame[key]}%`);
+}
+const draftFrame = () => (S.sheet.draft.image.frame ||= { zoom: 1, x: 50, y: 50 });
+
+// Writes the edit sheet's draft to the item. The item keeps its id, so saved
+// outfits, wear history, feedback and pair scores still refer to it.
+async function commitDraft() {
+  const s = S.sheet;
+  const it = getItem(s.id);
+  const d = s.draft;
+  const oldPhoto = it.image?.kind === 'photo' ? it.image.photoId : null;
+  const newPhoto = d.image?.kind === 'photo' ? d.image.photoId : null;
+  // Remove photo blobs no longer referenced.
+  for (const id of s.newPhotos) if (id !== newPhoto) await deletePhoto(id);
+  if (oldPhoto && oldPhoto !== newPhoto) await deletePhoto(oldPhoto);
+  s.newPhotos = [];
+  // Names the user never changed follow corrections to type, cut and colour.
+  if (!d.name.trim() || (s.autoName && d.name === it.name)) d.name = itemName(d.type, d.color, d.cut, d.length);
+  Object.assign(it, d, { name: d.name.trim().slice(0, 60) });
+  save();
+  return it;
+}
+
+// Swap an item's image and apply the confirmed details in place. Values the
+// user confirmed earlier on this item are kept unless confirmed again now.
+async function replaceImage(it, f) {
+  const autoName = it.name === itemName(it.type, it.color, it.cut, it.length);
+  const est = { ...(it.estimated || {}) };
+  const patch = { image: f.image, type: f.type, slot: TYPE[f.type].slot, cut: f.cut, length: f.length, color: f.color, pattern: f.pattern };
+  for (const k of ['warmth', 'water', 'walk', 'cycle']) {
+    if (!f.estimated[k]) { patch[k] = f[k]; est[k] = false; } else if (est[k] !== false || f.type !== it.type) { patch[k] = f[k]; est[k] = true; }
+  }
+  if (f.type !== it.type && est.formality !== false) patch.formality = f.formality;
+  patch.estimated = est;
+  if (f.sourceUrl) patch.sourceUrl = f.sourceUrl;
+  if (it.image?.kind === 'photo' && it.image.photoId !== f.image.photoId) await deletePhoto(it.image.photoId);
+  if (autoName) patch.name = itemName(f.type, f.color, f.cut, f.length);
+  return updateItem(it.id, patch);
+}
 
 function setConfirmed(field, value) {
   const d = S.sheet.draft;
@@ -1324,7 +1757,18 @@ const SUBMIT = {
     computeResults();
     render();
   },
-  archSearch() { runArchive(); },
+  catSearch() {
+    const C = S.cat;
+    const p = parseQuery(C.query);
+    const types = p.types || [];
+    Object.assign(C, {
+      slot: p.slot || (types.length && types.every((id) => TYPE[id].slot === TYPE[types[0]].slot) ? TYPE[types[0]].slot : ''),
+      type: types.length === 1 ? types[0] : '', types: types.length > 1 ? types : [],
+      cut: p.cut || '', length: p.length || '', color: p.color || '', pattern: p.pattern || '', ignored: p.ignored, limit: 30,
+    });
+    render();
+  },
+  onlineSearch() { runOnline(); },
 };
 
 const CHANGE = {
@@ -1341,7 +1785,14 @@ const INPUT = {
   draftNote(el) { S.today.draftNote = el.value; },
   fbNote(el) { S.sheet.note = el.value; },
   editName(el) { S.sheet.draft.name = el.value; },
-  archQuery(el) { S.archive.query = el.value; },
+  catQuery(el) { S.cat.query = el.value; },
+  linkUrl(el) { S.sheet.url = el.value; },
+  cfZoom(el) { setFrame(S.sheet.frame, 'zoom', el.value); },
+  cfX(el) { setFrame(S.sheet.frame, 'x', el.value); },
+  cfY(el) { setFrame(S.sheet.frame, 'y', el.value); },
+  edZoom(el) { setFrame(draftFrame(), 'zoom', el.value); },
+  edX(el) { setFrame(draftFrame(), 'x', el.value); },
+  edY(el) { setFrame(draftFrame(), 'y', el.value); },
 };
 
 function clampNum(v, a, b, d) {
@@ -1376,12 +1827,16 @@ document.addEventListener('submit', (e) => {
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && S.sheet) A.closeSheet();
 });
-// Archive images that fail to load (offline, removed) fall back to an illustration.
+// Images that fail to load (offline, removed, missing asset) fall back to an illustration.
 document.addEventListener('error', (e) => {
   const el = e.target;
   if (el.tagName === 'IMG' && el.dataset.fallback) {
     const it = getItem(el.dataset.fallback) || S.sheet?.draft;
-    if (it) el.outerHTML = toString(illustration(it.type, it.color, it.cut, it.pattern, el.className.replace('item-img', '')));
+    const frame = el.closest('.frame');
+    if (it) (frame || el).outerHTML = toString(illustration(it, frame ? frame.className.replace('frame', '') : ''));
+  } else if (el.tagName === 'IMG' && el.dataset.fallbackType) {
+    const { fallbackType, fallbackColor, fallbackCut, fallbackLength } = el.dataset;
+    el.outerHTML = toString(illustration({ type: fallbackType, color: fallbackColor, cut: fallbackCut || undefined, length: fallbackLength || undefined }, el.className.replace(/\bgarment\b|\bpending\b/g, '')));
   }
 }, true);
 

@@ -12,17 +12,47 @@ python3 -m http.server 5173 --bind 127.0.0.1
 
 Then open http://localhost:5173. Works best at phone width.
 
+The product requirements are in [REQUIREMENTS.md](REQUIREMENTS.md).
+
 ## Structure
 
 | File | Purpose |
 |---|---|
-| `js/catalog.js` | Garment types and their typical defaults, the colour palette, and the built-in SVG illustrations |
+| `js/catalog.js` | Garment types (cuts, lengths, typical defaults), starter basics, collection ordering, the colour palette, and the SVG illustrations (fallbacks and icons) |
+| `js/starter-catalog.js` | The curated starter catalogue: 83 examples, one per meaningful type × cut × length |
+| `js/garments.js` | Garment photo manifest, on-device recolouring, and photo-or-illustration rendering. See [assets/garments/README.md](assets/garments/README.md) |
 | `js/store.js` | Local storage: JSON in localStorage, photos in IndexedDB; upload validation and re-encoding |
 | `js/weather.js` | Open-Meteo forecast and geocoding, the time-window summary, manual fallback |
-| `js/archive.js` | Archive providers: Wikimedia Commons (live) and the built-in library (offline, labelled) |
+| `js/archive.js` | Search: free-text parsing into filters, ranking of curated results (type → cut → length → colour), and the quality-filtered Wikimedia Commons provider |
 | `js/plan.js` | Day-plan presets, remembered settings, free-text keyword hints |
 | `js/recommender.js` | Rule-based scoring with a reason recorded for each adjustment; swap alternatives; gap suggestions |
 | `js/app.js` | UI views, sheets and actions |
+
+## Adding clothes
+
+Setup is one shared flow for everyone:
+
+1. An optional question: which collection to show first (Womenswear, Menswear or All clothing). It only changes the order; nothing is hidden, and it can be changed at any time.
+2. One screen of everyday basics. "Can't find your item?" links to the larger catalogue and to photo upload.
+3. A next-steps screen. "Get my first outfit suggestions" unlocks once a complete outfit is possible.
+
+Afterwards, "Add clothing" in the wardrobe offers four options:
+- starter basics;
+- the catalogue, which has guided search and optional filters for category, type, cut, length, colour and pattern;
+- a photo upload;
+- importing from a product link.
+
+Every route ends in a short confirmation step. It shows a preview and editable details. Warmth and water resistance start as typical values and are never guessed from the picture, and each one offers "Not sure". Editing an item later lets you correct its details or replace its image. The item keeps its ID, so outfits, history and feedback are preserved.
+
+### Image sources
+
+| Source | Status |
+|---|---|
+| Curated starter catalogue | Working, offline. Images are illustrated stand-ins (labelled) until photos are added to `MANIFEST`. |
+| Your own photos | Working, on-device only. |
+| Wikimedia Commons archive | Working, no key needed. Results are quality-filtered and labelled unverified. |
+| Licensed retail API, product-link import | Need credentials or a server; not built. |
+| Background removal | Deferred. |
 
 ## How recommendations work
 
@@ -45,12 +75,13 @@ Then open http://localhost:5173. Works best at phone width.
 - Photos are downscaled and re-encoded through a canvas, which also removes EXIF metadata such as GPS location. They are stored as blobs in IndexedDB.
 - Network calls:
   - Open-Meteo receives your city's coordinates.
-  - Wikimedia Commons receives your archive search terms.
-  - Archive images are loaded directly from Wikimedia.
+  - Wikimedia Commons receives your online photo search terms.
+  - Online photos are loaded directly from Wikimedia.
 - No API keys are needed. A Content-Security-Policy limits connections to these hosts.
 - "Export backup" downloads your data as JSON (without photos). "Delete all my data" erases everything.
 
 ## Swapping providers
 
 - **Weather:** keep the `getForecastWindow()` interface.
-- **Archive:** add an object with `search()` to `PROVIDERS` in `archive.js`. A licensed retail or catalogue API would slot in here.
+- **Online catalogue:** implement the same `search({query, type, cut, color, offset, reported})` interface as `commonsProvider` in `archive.js`. A licensed retail or catalogue API would slot in here.
+- **Garment photos:** add entries to `MANIFEST` in `garments.js`, including licence, credit and source. Mark generated images with `generated: true`.
